@@ -1,0 +1,21 @@
+{
+  "name": "aigarbage",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Fully automated AI blog running on a single Cloudflare Worker",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "typecheck": "tsc --noEmit",
+    "tail": "wrangler tail"
+  },
+  "dependencies": {
+    "marked": "^18.0.4"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20260529.1",
+    "typescript": "^6.0.3",
+    "wrangler": "^4.95.0"
+  }
+}

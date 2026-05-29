@@ -1,9 +1,12 @@
 .DS_Store
-.env
 Thumbs.db
-db.json
 *.log
+
+# dependencies / build
 node_modules/
-public/
-.deploy*/
-_multiconfig.yml
+dist/
+
+# wrangler / cloudflare
+.wrangler/
+.dev.vars
+.env

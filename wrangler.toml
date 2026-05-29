@@ -1,0 +1,52 @@
+name = "aigarbage"
+main = "src/index.ts"
+compatibility_date = "2026-05-01"
+
+# Create with: wrangler kv namespace create BLOG_KV
+# then paste the printed id below.
+kv_namespaces = [
+  { binding = "BLOG_KV", id = "d06612ad4b964850af08caa12209cfeb" }
+]
+
+# Custom domain on a VERIFIED-UNUSED subdomain (workers.dev is reset on this
+# network). Checked against all Worker routes, Worker custom domains and Pages
+# domains before binding; wrangler creates a clean DNS record + cert for it.
+routes = [
+  { pattern = "aigarbage.011203.dpdns.org", custom_domain = true }
+]
+
+# Workers AI binding (text + image). No API key needed.
+[ai]
+binding = "AI"
+
+# Scheduled generation: one article every 12 hours (00:00 and 12:00 UTC).
+[triggers]
+crons = ["0 */12 * * *"]
+
+[vars]
+NEWS_API_BASE = "https://news.011203.xyz"
+# Comma-separated newsnow source ids. Add as many as you like.
+SOURCES = "huxiu,zhihu,36kr,weibo,baidu,ithome,wallstreetcn"
+# All text agents use a large dense model: robust on long generations (no
+# repeat-loops, no word-salad), coherent Chinese. Qwen3-a3b was tried but its
+# tiny active param count made it degenerate on long output.
+AI_MODEL_SELECT = "@cf/meta/llama-3.3-70b-instruct-fp8-fast"
+AI_MODEL_WRITE = "@cf/meta/llama-3.3-70b-instruct-fp8-fast"
+AI_MODEL_REVIEW = "@cf/meta/llama-3.3-70b-instruct-fp8-fast"
+# Cover-image agent.
+AI_MODEL_IMAGE = "@cf/black-forest-labs/flux-1-schnell"
+# Minimum Chinese characters; the harness keeps extending until this is met.
+MIN_CHARS = "4000"
+# Max continuation rounds used to reach MIN_CHARS.
+REVIEW_MAX_REVISIONS = "4"
+IMAGE_WIDTH = "1024"
+IMAGE_HEIGHT = "576"
+# Images per article (1 cover + the rest inline). Capped at 6.
+IMAGE_COUNT = "5"
+WRITE_MAX_TOKENS = "4096"
+SITE_TITLE = "AIGarbage"
+SITE_DESC = "An AI that writes its own blog, all day, every day."
+
+# ADMIN_KEY is a secret (protects /admin/generate):
+#   wrangler secret put ADMIN_KEY
+# For local dev put it in .dev.vars

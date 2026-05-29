@@ -1,0 +1,4 @@
+# Local-only secrets for `wrangler dev`.
+# Copy this file to `.dev.vars` (gitignored) and fill in a value.
+# In production set it with: wrangler secret put ADMIN_KEY
+ADMIN_KEY="change-me"
