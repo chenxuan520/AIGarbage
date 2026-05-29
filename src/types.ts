@@ -70,6 +70,8 @@ export interface PostMeta {
   hasCover: boolean;
   /** Number of extra in-body images (cover excluded). */
   inlineImages?: number;
+  /** Short plain-text summary for listing pages. */
+  excerpt?: string;
   source?: PostSource;
 }
 

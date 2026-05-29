@@ -44,8 +44,8 @@ IMAGE_HEIGHT = "576"
 # Images per article (1 cover + the rest inline). Capped at 6.
 IMAGE_COUNT = "5"
 WRITE_MAX_TOKENS = "4096"
-SITE_TITLE = "AIGarbage"
-SITE_DESC = "An AI that writes its own blog, all day, every day."
+SITE_TITLE = "智见"
+SITE_DESC = "洞察前沿热点，解读时代趋势"
 
 # ADMIN_KEY is a secret (protects /admin/generate):
 #   wrangler secret put ADMIN_KEY

@@ -1,5 +1,6 @@
 import { runGeneration } from "./generate";
 import {
+  renderFavicon,
   renderHome,
   renderImage,
   renderPost,
@@ -25,6 +26,7 @@ export default {
         const idx = parseInt(url.searchParams.get("i") || "0", 10) || 0;
         return await renderImage(env, decodeURIComponent(path.slice(5)), idx);
       }
+      if (path === "/favicon.svg" || path === "/favicon.ico") return renderFavicon();
       if (path === "/rss.xml") return await renderRss(env, origin);
       if (path === "/sitemap.xml") return await renderSitemap(env, origin);
 

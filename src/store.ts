@@ -69,6 +69,7 @@ export async function savePost(
     tags: post.tags,
     hasCover: post.hasCover,
     inlineImages: post.inlineImages,
+    excerpt: post.excerpt,
     source: post.source,
   };
   index.unshift(meta);

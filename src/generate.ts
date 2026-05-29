@@ -19,6 +19,19 @@ function stripArtifacts(md: string): string {
   return md.replace(/<think>[\s\S]*?<\/think>/gi, "").trim();
 }
 
+// Plain-text summary (first sentence-ish) for listing pages.
+function makeExcerpt(md: string): string {
+  const text = md
+    .replace(/```[\s\S]*?```/g, " ")
+    .replace(/!\[[^\]]*\]\([^)]*\)/g, " ")
+    .replace(/\[([^\]]*)\]\([^)]*\)/g, "$1")
+    .replace(/^#{1,6}\s+.*$/gm, " ")
+    .replace(/[>#*_`~|]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return text.slice(0, 90);
+}
+
 // Drop duplicate paragraphs — models sometimes loop and repeat a whole block.
 function dedupeParagraphs(md: string): string {
   const blocks = md.split(/\n{2,}/);
@@ -281,6 +294,7 @@ export async function runGeneration(env: Env): Promise<{
     tags: [],
     hasCover: images.length >= 1,
     inlineImages: Math.max(0, images.length - 1),
+    excerpt: makeExcerpt(markdown),
     source: matchSource(candidates, selection.chosenTitle),
     markdown,
   };
