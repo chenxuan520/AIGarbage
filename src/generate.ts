@@ -7,7 +7,7 @@ import {
   buildSelectMessages,
   buildWriteMessages,
 } from "./prompts";
-import { getSources } from "./sources";
+import { fetchSourceContent, getSources } from "./sources";
 import { getIndex, savePost, slugify } from "./store";
 import type { Env, NewsItem, Post, PostSource, TopicSelection } from "./types";
 
@@ -221,13 +221,20 @@ export async function selectTopic(
   };
 }
 
-/** Agent 2: write the initial draft. */
+/** Agent 2: write the initial draft (grounded in the original article text). */
 export async function writeArticle(
   env: Env,
   sel: TopicSelection,
   cfg: GenConfig,
+  reference = "",
 ): Promise<string> {
-  const md = await runText(env, cfg.modelWrite, buildWriteMessages(sel), cfg.writeMaxTokens, cfg);
+  const md = await runText(
+    env,
+    cfg.modelWrite,
+    buildWriteMessages(sel, reference),
+    cfg.writeMaxTokens,
+    cfg,
+  );
   return stripArtifacts(md);
 }
 
@@ -237,12 +244,13 @@ async function writeMore(
   sel: TopicSelection,
   soFar: string,
   cfg: GenConfig,
+  reference = "",
 ): Promise<string> {
   const tail = soFar.slice(-800);
   const md = await runText(
     env,
     cfg.modelWrite,
-    buildContinuationMessages(sel, tail),
+    buildContinuationMessages(sel, tail, reference),
     cfg.writeMaxTokens,
     cfg,
   );
@@ -304,16 +312,17 @@ async function writeWithHarness(
   env: Env,
   sel: TopicSelection,
   cfg: GenConfig,
+  reference = "",
 ): Promise<{ markdown: string; review: Review; chars: number }> {
   const min = cfg.minChars;
   const maxRounds = parseInt(env.REVIEW_MAX_REVISIONS || "6", 10);
 
-  let md = dedupeParagraphs(await writeArticle(env, sel, cfg));
+  let md = dedupeParagraphs(await writeArticle(env, sel, cfg, reference));
 
   // 1) Keep continuing until we reach the minimum *unique* length.
   for (let round = 0; round < maxRounds && countCjk(md) < min; round++) {
     const prev = countCjk(md);
-    const more = await writeMore(env, sel, md, cfg);
+    const more = await writeMore(env, sel, md, cfg, reference);
     if (!more) break;
     md = dedupeParagraphs(`${md}\n\n${more}`);
     const now = countCjk(md);
@@ -366,11 +375,15 @@ function extractTitle(markdown: string, fallback: string): string {
   return (m ? m[1] : fallback).trim() || fallback;
 }
 
-function matchSource(candidates: NewsItem[], title: string): PostSource | undefined {
-  const hit =
+function matchSourceItem(candidates: NewsItem[], title: string): NewsItem | undefined {
+  return (
     candidates.find((c) => c.title === title) ??
-    candidates.find((c) => title.includes(c.title) || c.title.includes(title));
-  return hit ? { id: hit.source ?? "", title: hit.title, url: hit.url } : undefined;
+    candidates.find((c) => title.includes(c.title) || c.title.includes(title))
+  );
+}
+
+function toPostSource(item: NewsItem | undefined): PostSource | undefined {
+  return item ? { id: item.source ?? "", title: item.title, url: item.url } : undefined;
 }
 
 /** Full pipeline: collect -> select -> write -> illustrate -> store. */
@@ -390,10 +403,18 @@ export async function runGeneration(env: Env): Promise<{
 
   const selection = await selectTopic(env, candidates, cfg, recent);
 
+  // Pull the ORIGINAL article so the writer is grounded in real facts instead
+  // of hallucinating from a headline. Per-source extractor; "" if unavailable.
+  const sourceItem = matchSourceItem(candidates, selection.chosenTitle);
+  const reference = sourceItem ? await fetchSourceContent(sourceItem.source ?? "", sourceItem.url) : "";
+  console.log(
+    `reference: ${reference ? `${reference.length} chars from ${sourceItem?.source}` : "none (headline-only)"}`,
+  );
+
   // Images only depend on the selection (not the article body), so generate
   // them concurrently with the (slow) write+review+extend harness.
   const [harness, images] = await Promise.all([
-    writeWithHarness(env, selection, cfg),
+    writeWithHarness(env, selection, cfg, reference),
     generateImages(env, selection.imagePrompts, cfg.modelImage),
   ]);
 
@@ -423,7 +444,7 @@ export async function runGeneration(env: Env): Promise<{
     inlineImages: Math.max(0, images.length - 1),
     excerpt: makeExcerpt(markdown),
     chars: harness.chars,
-    source: matchSource(candidates, selection.chosenTitle),
+    source: toPostSource(sourceItem),
     markdown,
   };
 

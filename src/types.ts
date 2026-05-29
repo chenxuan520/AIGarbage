@@ -55,6 +55,8 @@ export interface DataSource {
   id: string;
   name: string;
   fetch(env: Env): Promise<NewsItem[]>;
+  /** Optional site-specific article-body extractor (falls back to generic). */
+  fetchContent?(item: NewsItem, env: Env): Promise<string>;
 }
 
 /** Structured output of the topic-selection agent. */

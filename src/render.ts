@@ -478,12 +478,12 @@ function overviewWidget(index: PostMeta[]): string {
   const today = new Date().toISOString().slice(0, 10);
   const todayN = index.filter((m) => m.date.slice(0, 10) === today).length;
   const cats = new Set(index.map(categoryOf)).size;
-  const imgs = index.reduce((a, m) => a + (m.hasCover ? 1 : 0) + (m.inlineImages ?? 0), 0);
+  const totalViews = index.reduce((a, m) => a + postStats(m).views, 0);
   const cell = (v: string | number, label: string) => `<div><b>${v}</b><span>${label}</span></div>`;
   return `<section class="widget"><h4>数据概览</h4><div class="ov">${cell(
     index.length,
     "累计报道",
-  )}${cell(todayN, "今日更新")}${cell(cats, "栏目")}${cell(fmtCount(imgs), "配图")}</div></section>`;
+  )}${cell(todayN, "今日更新")}${cell(cats, "栏目")}${cell(fmtCount(totalViews), "总阅读")}</div></section>`;
 }
 
 // "实时热榜": top posts by heat, numbered, with a heat meter.

@@ -54,9 +54,22 @@ export function buildSelectMessages(
   ];
 }
 
+/** Trim reference material so it grounds the model without blowing the budget. */
+function refBlock(reference: string, max = 3500): string {
+  const r = (reference || "").trim();
+  if (!r) return "";
+  return (
+    "【原文资料 / 事实依据(务必基于以下真实内容写作,关键事实、人物、数字、时间以原文为准," +
+    "绝不能编造与原文矛盾或原文没有的事实;可在事实基础上做分析与展开)】:\n" +
+    r.slice(0, max) +
+    "\n\n"
+  );
+}
+
 /** Writing agent: turn the selected topic into a full markdown article. */
-export function buildWriteMessages(sel: TopicSelection): ChatMessage[] {
+export function buildWriteMessages(sel: TopicSelection, reference = ""): ChatMessage[] {
   const points = (sel.keyPoints ?? []).map((p) => `- ${p}`).join("\n");
+  const ref = refBlock(reference);
   return [
     { role: "system", content: WRITER_STYLE },
     {
@@ -66,11 +79,15 @@ export function buildWriteMessages(sel: TopicSelection): ChatMessage[] {
         `参考标题: ${sel.chosenTitle}\n` +
         (sel.angle ? `爆点/角度: ${sel.angle}\n` : "") +
         (points ? `要覆盖的要点:\n${points}\n` : "") +
-        "\n要求:\n" +
+        "\n" +
+        ref +
+        "要求:\n" +
         "- 第一行必须是一级标题(# 标题),标题要标题党:夸张吸睛、带悬念或反问、可用数字和感叹号,但别离题。\n" +
         "- 开头第一段用一个强钩子(设问/反差/悬念)把读者勾住。\n" +
         "- 多用二级小标题(可带【】或表情符号),短段落、短句、口语化,适当用反问和感叹制造代入感。\n" +
-        "- 内容基于事实,不要编造具体数字;可以渲染情绪但别造假。\n" +
+        (ref
+          ? "- 内容必须严格基于上面的原文资料,关键事实/数字/人物/时间以原文为准,绝不凭空捏造;原文没提到的具体事实不要编造,可以做合理分析和延展。\n"
+          : "- 内容基于事实,不要编造具体数字;可以渲染情绪但别造假。\n") +
         "- 尽量写长,至少 2000 字,用尽量多的二级小标题(## )分节充分展开(背景、起因、细节、各方反应、影响、分析等),绝不写空话凑字数;先别急着收尾,后面可能还要继续展开。\n" +
         "- 只输出 markdown 正文,不要输出任何额外说明文字。",
     },
@@ -78,17 +95,24 @@ export function buildWriteMessages(sel: TopicSelection): ChatMessage[] {
 }
 
 /** Writing agent: continue an existing article with brand-new sections. */
-export function buildContinuationMessages(sel: TopicSelection, tail: string): ChatMessage[] {
+export function buildContinuationMessages(
+  sel: TopicSelection,
+  tail: string,
+  reference = "",
+): ChatMessage[] {
+  const ref = refBlock(reference, 1800);
   return [
     { role: "system", content: WRITER_STYLE },
     {
       role: "user",
       content:
         `你正在续写一篇关于「${sel.chosenTitle}」的 UC 标题党爆款长文。\n` +
+        ref +
         "下面是文章已写好的结尾片段(仅供衔接,绝对不要重复它的内容):\n" +
         `“……${tail}”\n\n` +
         "请紧接着继续往下写,新增 2-3 个**全新角度**的二级小标题(## )小节,延续同样的爆款口语风格。" +
         "从这些还没写过的角度里挑没用过的展开:真实案例 / 具体套路拆解 / 数据与行业现状 / 各方与网友吵翻了 / 法律与维权 / 普通人如何自保 / 背后深层原因 / 未来会怎样 / 一个反转。\n" +
+        (ref ? "续写内容同样要忠于上面的原文资料,不得编造与原文矛盾的事实。\n" : "") +
         "每个小节都要有新信息,不要重复前文任何句子,不要写大标题(#),不要写“综上/以上/总之”这种收尾。\n" +
         "直接输出 markdown 正文片段,至少 1200 字,不要任何说明。",
     },

@@ -1,5 +1,8 @@
 import type { DataSource, Env } from "../types";
+import { fetchSourceContent } from "./content";
 import { newsNowSource } from "./newsnow";
+
+export { fetchSourceContent } from "./content";
 
 /**
  * Friendly display names for well-known newsnow source ids.
@@ -34,5 +37,9 @@ export function getSources(env: Env): DataSource[] {
     .map((s) => s.trim())
     .filter(Boolean);
 
-  return ids.map((id) => newsNowSource(id, KNOWN_NAMES[id] ?? id));
+  return ids.map((id) => {
+    const src = newsNowSource(id, KNOWN_NAMES[id] ?? id);
+    src.fetchContent = (item) => fetchSourceContent(id, item.url);
+    return src;
+  });
 }

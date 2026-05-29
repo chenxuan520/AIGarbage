@@ -11,6 +11,7 @@ import {
 import { isAuthed } from "./auth";
 import { runGeneration } from "./generate";
 import { renderQr } from "./qr";
+import { fetchSourceContent } from "./sources";
 import {
   renderFavicon,
   renderHome,
@@ -80,6 +81,14 @@ export default {
         if (!(await isAuthed(request, env))) return redirect("/admin/login");
         if (method !== "POST") return redirect("/admin");
         return await handleDelete(env, request);
+      }
+      if (path === "/admin/extract") {
+        if (!(await isAuthed(request, env))) return redirect("/admin/login");
+        const text = await fetchSourceContent(
+          url.searchParams.get("id") || "",
+          url.searchParams.get("url") || "",
+        );
+        return Response.json({ len: text.length, sample: text.slice(0, 800) });
       }
 
       if (path === "/admin/generate") {
