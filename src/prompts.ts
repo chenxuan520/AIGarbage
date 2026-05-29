@@ -13,27 +13,43 @@ export const WRITER_STYLE =
   "内容仍要基于事实展开,不要胡编数据。直接返回 markdown 正文,不要任何额外说明或前后缀。";
 
 /** Topic-selection agent: pick one topic and return strict JSON. */
-export function buildSelectMessages(candidates: NewsItem[]): ChatMessage[] {
+export function buildSelectMessages(
+  candidates: NewsItem[],
+  recentTitles: string[] = [],
+): ChatMessage[] {
   const list = candidates.map((c, i) => `${i + 1}. ${c.title}`).join("\n");
+  const avoidBlock = recentTitles.length
+    ? "最近一个月已经写过的选题(下面这些主题、以及与它们高度相似的同一事件,都【绝对禁止】再选," +
+      "必须另挑一个全新、不重复的选题):\n" +
+      recentTitles
+        .slice(0, 50)
+        .map((t) => `- ${t}`)
+        .join("\n") +
+      "\n\n"
+    : "";
   return [
     {
       role: "system",
       content:
         "你是一个爆款自媒体的选题编辑。从给定热点标题里挑 1 个最有“爆点”、" +
-        "最适合写成 UC 标题党爆款文的选题,并给出抓人的写作角度、几个要点,以及一句英文配图描述。",
+        "最适合写成 UC 标题党爆款文的选题,并给出抓人的写作角度、几个要点,以及一句英文配图描述。" +
+        "重要:绝不能选最近已经写过或高度相似的选题,务必保证选题新鲜、不与近期重复。",
     },
     {
       role: "user",
       content:
         `候选热点标题:\n${list}\n\n` +
+        avoidBlock +
         "只输出一个 JSON 对象,不要包含 markdown 代码块、注释或任何额外文字。" +
-        "imagePrompts 必须是 5 条不同的英文配图描述,每条都要极度夸张、戏剧化、吸睛" +
-        "(tabloid / clickbait 风格:夸张的表情或场面、强烈对比、电影级打光),画面里不要出现任何文字。\n" +
+        "chosenTitle 对应的选题不能与上面“已经写过”的任何一条重复或高度相似。" +
+        "imagePrompts 必须是 5 条不同的英文配图描述,写实、专业、干净的新闻/编辑类配图风格" +
+        "(纪实摄影、真实场景、专业图片质感),贴合主题、有画面感、构图克制;" +
+        "画面里绝对不要出现任何文字、字母、数字、字幕、水印或 logo。\n" +
         "严格使用如下结构:\n" +
         `{"chosenTitle":"一个夸张吸睛、带悬念或反问的标题党标题",` +
         `"angle":"一句话点出爆点/冲突/反差",` +
         `"keyPoints":["要点1","要点2","要点3"],` +
-        `"imagePrompts":["dramatic ENGLISH prompt 1","dramatic ENGLISH prompt 2","dramatic ENGLISH prompt 3","dramatic ENGLISH prompt 4","dramatic ENGLISH prompt 5"]}`,
+        `"imagePrompts":["realistic editorial photo prompt 1, no text","clean documentary photo prompt 2, no text","professional photo prompt 3, no text","realistic scene prompt 4, no text","editorial illustration prompt 5, no text"]}`,
     },
   ];
 }

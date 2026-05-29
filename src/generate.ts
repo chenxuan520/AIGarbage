@@ -1,4 +1,5 @@
 import { generateImageBytes, parseJsonLoose, runText } from "./ai";
+import { getConfig, type GenConfig } from "./config";
 import {
   buildContinuationMessages,
   buildReviewMessages,
@@ -7,7 +8,7 @@ import {
   buildWriteMessages,
 } from "./prompts";
 import { getSources } from "./sources";
-import { savePost, slugify } from "./store";
+import { getIndex, savePost, slugify } from "./store";
 import type { Env, NewsItem, Post, PostSource, TopicSelection } from "./types";
 
 function countCjk(s: string): number {
@@ -30,6 +31,69 @@ function makeExcerpt(md: string): string {
     .replace(/\s+/g, " ")
     .trim();
   return text.slice(0, 90);
+}
+
+// ---- topic de-duplication (avoid repeating recent topics) ----
+
+/** Normalize a title for comparison: lowercase, strip punctuation/whitespace. */
+function normTitle(s: string): string {
+  return s.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, "");
+}
+
+function bigramSet(s: string): Set<string> {
+  const n = normTitle(s);
+  const set = new Set<string>();
+  if (n.length <= 1) {
+    if (n) set.add(n);
+    return set;
+  }
+  for (let i = 0; i < n.length - 1; i++) set.add(n.slice(i, i + 2));
+  return set;
+}
+
+/** Character-bigram Jaccard similarity (0..1). */
+function similarity(a: string, b: string): number {
+  const A = bigramSet(a);
+  const B = bigramSet(b);
+  if (!A.size || !B.size) return 0;
+  let inter = 0;
+  for (const x of A) if (B.has(x)) inter++;
+  return inter / (A.size + B.size - inter);
+}
+
+/** True if `title` matches or is highly similar to any recent title. */
+function isTooSimilar(title: string, recentTitles: string[]): boolean {
+  const n = normTitle(title);
+  if (!n) return false;
+  for (const rt of recentTitles) {
+    const r = normTitle(rt);
+    if (!r) continue;
+    if (r === n) return true;
+    if (r.length >= 6 && (n.includes(r) || r.includes(n))) return true;
+    if (similarity(title, rt) >= 0.6) return true;
+  }
+  return false;
+}
+
+interface RecentContext {
+  titles: string[]; // recent article titles (for the avoid-list / similarity)
+  usedKeys: Set<string>; // normalized article + source headlines already covered
+}
+
+/** Collect topics covered within the last `days` so we never repeat them. */
+async function getRecentContext(env: Env, days = 30): Promise<RecentContext> {
+  const index = await getIndex(env);
+  const cutoff = Date.now() - days * 86400 * 1000;
+  const titles: string[] = [];
+  const usedKeys = new Set<string>();
+  for (const m of index) {
+    const t = Date.parse(m.date);
+    if (!Number.isFinite(t) || t < cutoff) continue;
+    titles.push(m.title);
+    usedKeys.add(normTitle(m.title));
+    if (m.source?.title) usedKeys.add(normTitle(m.source.title));
+  }
+  return { titles, usedKeys };
 }
 
 // Drop duplicate paragraphs — models sometimes loop and repeat a whole block.
@@ -71,56 +135,83 @@ async function collectCandidates(env: Env): Promise<NewsItem[]> {
   return items;
 }
 
-// Style suffix that pushes every image toward an exaggerated, tabloid look.
+// Style suffix: clean, professional, photojournalistic — and aggressively
+// text-free (diffusion models love to scribble garbled letters otherwise).
 const IMAGE_STYLE =
-  ", dramatic exaggerated sensational tabloid editorial illustration, " +
-  "bold dramatic lighting, high contrast, cinematic, eye-catching, no text, no watermark";
+  ", professional editorial news photography, realistic, clean composition, " +
+  "natural lighting, high detail, high quality, " +
+  "no text, no words, no letters, no numbers, no captions, no watermark, no logo, no signage";
 
-function imageCount(env: Env): number {
-  const n = parseInt(env.IMAGE_COUNT || "5", 10);
-  return Math.min(Math.max(1, Number.isNaN(n) ? 5 : n), 6);
+function imageCount(cfg: GenConfig): number {
+  return Math.min(Math.max(1, cfg.imageCount || 5), 6);
 }
 
 // Ensure we always have exactly `n` prompts, padding with generic exaggerated ones.
 function padPrompts(prompts: string[], n: number, title: string): string[] {
   const out = prompts.filter(Boolean).slice(0, n);
   const generic = [
-    `a shocked crowd reacting to "${title}"`,
-    `a dramatic exaggerated scene illustrating "${title}"`,
-    `a bold over-the-top symbolic depiction of "${title}"`,
-    `an explosive eye-catching illustration about "${title}"`,
+    `a realistic professional editorial photo illustrating "${title}", no text`,
+    `a clean documentary-style scene related to "${title}", no text`,
+    `a professional news illustration about "${title}", no text`,
+    `a realistic depiction of the topic "${title}", no text`,
   ];
   let i = 0;
   while (out.length < n) out.push(generic[i++ % generic.length]);
   return out;
 }
 
-/** Agent 1: pick a topic + angle + several exaggerated image prompts. */
-export async function selectTopic(env: Env, candidates: NewsItem[]): Promise<TopicSelection> {
-  const sample = candidates.slice(0, 40);
-  const text = await runText(env, env.AI_MODEL_SELECT, buildSelectMessages(sample), 700);
-  const parsed = parseJsonLoose<Record<string, unknown>>(text);
-  const want = imageCount(env);
+function buildSelection(
+  parsed: Record<string, unknown>,
+  title: string,
+  want: number,
+): TopicSelection {
+  const raw = Array.isArray(parsed.imagePrompts)
+    ? (parsed.imagePrompts as unknown[]).map((x) => String(x))
+    : parsed.imagePrompt
+      ? [String(parsed.imagePrompt)]
+      : [];
+  return {
+    chosenTitle: title,
+    angle: parsed.angle ? String(parsed.angle) : "",
+    keyPoints: Array.isArray(parsed.keyPoints)
+      ? (parsed.keyPoints as unknown[]).map((x) => String(x))
+      : [],
+    imagePrompts: padPrompts(raw, want, title),
+  };
+}
 
-  if (parsed && parsed.chosenTitle) {
-    const title = String(parsed.chosenTitle).trim();
-    const raw = Array.isArray(parsed.imagePrompts)
-      ? (parsed.imagePrompts as unknown[]).map((x) => String(x))
-      : parsed.imagePrompt
-        ? [String(parsed.imagePrompt)]
-        : [];
-    return {
-      chosenTitle: title,
-      angle: parsed.angle ? String(parsed.angle) : "",
-      keyPoints: Array.isArray(parsed.keyPoints)
-        ? (parsed.keyPoints as unknown[]).map((x) => String(x))
-        : [],
-      imagePrompts: padPrompts(raw, want, title),
-    };
+/** Agent 1: pick a FRESH topic (not covered recently) + angle + image prompts. */
+export async function selectTopic(
+  env: Env,
+  candidates: NewsItem[],
+  cfg: GenConfig,
+  recent: RecentContext,
+): Promise<TopicSelection> {
+  const want = imageCount(cfg);
+
+  // Hard filter: drop headlines already covered in the last month so the model
+  // can't even re-pick them. Fall back to the full set only if all are stale.
+  const fresh = candidates.filter(
+    (c) => !recent.usedKeys.has(normTitle(c.title)) && !isTooSimilar(c.title, recent.titles),
+  );
+  const pool = (fresh.length ? fresh : candidates).slice(0, 40);
+  console.log(`select pool: ${pool.length} fresh of ${candidates.length} (recent=${recent.titles.length})`);
+
+  // Ask the model, and retry once if it still returns a recent duplicate.
+  const avoid = [...recent.titles];
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const text = await runText(env, cfg.modelSelect, buildSelectMessages(pool, avoid), 700, cfg);
+    const parsed = parseJsonLoose<Record<string, unknown>>(text);
+    const title = parsed?.chosenTitle ? String(parsed.chosenTitle).trim() : "";
+    if (parsed && title) {
+      if (!isTooSimilar(title, recent.titles)) return buildSelection(parsed, title, want);
+      console.log(`select attempt ${attempt + 1}: "${title}" duplicates recent; retrying`);
+      avoid.push(title); // forbid this one explicitly on the retry
+    }
   }
 
-  // Fallback: just take the hottest item.
-  const fallback = sample[0];
+  // Fallback: first fresh candidate that isn't a recent duplicate.
+  const fallback = pool.find((c) => !isTooSimilar(c.title, recent.titles)) ?? pool[0];
   const title = fallback?.title ?? "今日热点观察";
   return {
     chosenTitle: title,
@@ -131,17 +222,30 @@ export async function selectTopic(env: Env, candidates: NewsItem[]): Promise<Top
 }
 
 /** Agent 2: write the initial draft. */
-export async function writeArticle(env: Env, sel: TopicSelection): Promise<string> {
-  const max = parseInt(env.WRITE_MAX_TOKENS || "4096", 10);
-  const md = await runText(env, env.AI_MODEL_WRITE, buildWriteMessages(sel), max);
+export async function writeArticle(
+  env: Env,
+  sel: TopicSelection,
+  cfg: GenConfig,
+): Promise<string> {
+  const md = await runText(env, cfg.modelWrite, buildWriteMessages(sel), cfg.writeMaxTokens, cfg);
   return stripArtifacts(md);
 }
 
 /** Writing agent: continue the article with new sections (for length). */
-async function writeMore(env: Env, sel: TopicSelection, soFar: string): Promise<string> {
-  const max = parseInt(env.WRITE_MAX_TOKENS || "4096", 10);
+async function writeMore(
+  env: Env,
+  sel: TopicSelection,
+  soFar: string,
+  cfg: GenConfig,
+): Promise<string> {
   const tail = soFar.slice(-800);
-  const md = await runText(env, env.AI_MODEL_WRITE, buildContinuationMessages(sel, tail), max);
+  const md = await runText(
+    env,
+    cfg.modelWrite,
+    buildContinuationMessages(sel, tail),
+    cfg.writeMaxTokens,
+    cfg,
+  );
   // Drop any stray top-level title the continuation might add.
   return stripArtifacts(md).replace(/^\s*#\s+[^\n]*\n?/, "").trim();
 }
@@ -154,9 +258,18 @@ interface Review {
 }
 
 /** Review/harness agent: audit the draft. */
-export async function reviewArticle(env: Env, markdown: string): Promise<Review> {
-  const min = parseInt(env.MIN_CHARS || "4000", 10);
-  const text = await runText(env, env.AI_MODEL_REVIEW, buildReviewMessages(markdown, min), 600);
+export async function reviewArticle(
+  env: Env,
+  markdown: string,
+  cfg: GenConfig,
+): Promise<Review> {
+  const text = await runText(
+    env,
+    cfg.modelReview,
+    buildReviewMessages(markdown, cfg.minChars),
+    600,
+    cfg,
+  );
   const p = parseJsonLoose<Record<string, unknown>>(text) ?? {};
   return {
     pass: p.pass === true,
@@ -171,14 +284,14 @@ async function reviseArticle(
   sel: TopicSelection,
   draft: string,
   review: Review,
+  cfg: GenConfig,
 ): Promise<string> {
-  const min = parseInt(env.MIN_CHARS || "4000", 10);
-  const max = parseInt(env.WRITE_MAX_TOKENS || "4096", 10);
   const md = await runText(
     env,
-    env.AI_MODEL_WRITE,
-    buildReviseMessages(sel, draft, review.problems, review.suggestion, min),
-    max,
+    cfg.modelWrite,
+    buildReviseMessages(sel, draft, review.problems, review.suggestion, cfg.minChars),
+    cfg.writeMaxTokens,
+    cfg,
   );
   return stripArtifacts(md);
 }
@@ -190,16 +303,17 @@ async function reviseArticle(
 async function writeWithHarness(
   env: Env,
   sel: TopicSelection,
+  cfg: GenConfig,
 ): Promise<{ markdown: string; review: Review; chars: number }> {
-  const min = parseInt(env.MIN_CHARS || "4000", 10);
+  const min = cfg.minChars;
   const maxRounds = parseInt(env.REVIEW_MAX_REVISIONS || "6", 10);
 
-  let md = dedupeParagraphs(await writeArticle(env, sel));
+  let md = dedupeParagraphs(await writeArticle(env, sel, cfg));
 
   // 1) Keep continuing until we reach the minimum *unique* length.
   for (let round = 0; round < maxRounds && countCjk(md) < min; round++) {
     const prev = countCjk(md);
-    const more = await writeMore(env, sel, md);
+    const more = await writeMore(env, sel, md, cfg);
     if (!more) break;
     md = dedupeParagraphs(`${md}\n\n${more}`);
     const now = countCjk(md);
@@ -214,17 +328,17 @@ async function writeWithHarness(
   // 2) Reviewer audit. Length is already enforced via continuation above; we
   // deliberately do NOT auto-rewrite (a full rewrite of a long article is slow
   // and rarely worth it). The verdict is logged/returned for visibility.
-  const review = await reviewArticle(env, md);
+  const review = await reviewArticle(env, md, cfg);
   console.log(`review: pass=${review.pass} chars=${countCjk(md)} problems=${review.problems.join("; ")}`);
 
   return { markdown: md, review, chars: countCjk(md) };
 }
 
 /** Generate one image, best-effort with a retry (never throws). */
-async function generateOne(env: Env, prompt: string): Promise<Uint8Array | null> {
+async function generateOne(env: Env, prompt: string, model: string): Promise<Uint8Array | null> {
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
-      return await generateImageBytes(env, prompt + IMAGE_STYLE);
+      return await generateImageBytes(env, prompt + IMAGE_STYLE, model);
     } catch (e) {
       console.error(`image attempt ${attempt + 1} failed:`, e);
     }
@@ -233,10 +347,14 @@ async function generateOne(env: Env, prompt: string): Promise<Uint8Array | null>
 }
 
 /** Agent 3: generate several exaggerated images; returns only successful ones. */
-export async function generateImages(env: Env, prompts: string[]): Promise<Uint8Array[]> {
+export async function generateImages(
+  env: Env,
+  prompts: string[],
+  model: string,
+): Promise<Uint8Array[]> {
   const out: Uint8Array[] = [];
   for (const prompt of prompts) {
-    const bytes = await generateOne(env, prompt);
+    const bytes = await generateOne(env, prompt, model);
     if (bytes) out.push(bytes);
   }
   return out;
@@ -263,19 +381,20 @@ export async function runGeneration(env: Env): Promise<{
   chars: number;
   reviewPass: boolean;
 } | null> {
-  const candidates = await collectCandidates(env);
+  const cfg = await getConfig(env);
+  const [candidates, recent] = await Promise.all([collectCandidates(env), getRecentContext(env, 30)]);
   if (candidates.length === 0) {
     console.error("no candidates from any source; aborting");
     return null;
   }
 
-  const selection = await selectTopic(env, candidates);
+  const selection = await selectTopic(env, candidates, cfg, recent);
 
   // Images only depend on the selection (not the article body), so generate
   // them concurrently with the (slow) write+review+extend harness.
   const [harness, images] = await Promise.all([
-    writeWithHarness(env, selection),
-    generateImages(env, selection.imagePrompts),
+    writeWithHarness(env, selection, cfg),
+    generateImages(env, selection.imagePrompts, cfg.modelImage),
   ]);
 
   const markdown = harness.markdown;
@@ -285,6 +404,14 @@ export async function runGeneration(env: Env): Promise<{
   }
 
   const title = extractTitle(markdown, selection.chosenTitle);
+
+  // Final safety net: never store a post whose title duplicates a recent one
+  // (guards against cron/manual runs racing on the same hot topic).
+  if (isTooSimilar(title, recent.titles)) {
+    console.warn(`skip save: "${title}" duplicates a recent topic`);
+    return null;
+  }
+
   const slug = slugify(title);
 
   const post: Post = {
@@ -295,6 +422,7 @@ export async function runGeneration(env: Env): Promise<{
     hasCover: images.length >= 1,
     inlineImages: Math.max(0, images.length - 1),
     excerpt: makeExcerpt(markdown),
+    chars: harness.chars,
     source: matchSource(candidates, selection.chosenTitle),
     markdown,
   };

@@ -70,8 +70,48 @@ export async function savePost(
     hasCover: post.hasCover,
     inlineImages: post.inlineImages,
     excerpt: post.excerpt,
+    chars: post.chars,
     source: post.source,
   };
   index.unshift(meta);
   await env.BLOG_KV.put(INDEX_KEY, JSON.stringify(index.slice(0, INDEX_LIMIT)));
+}
+
+/** Update an existing post's editable fields and sync the index entry. */
+export async function updatePost(
+  env: Env,
+  slug: string,
+  fields: Partial<Pick<Post, "title" | "markdown" | "excerpt" | "chars" | "tags">>,
+): Promise<Post | null> {
+  const post = await getPost(env, slug);
+  if (!post) return null;
+  const next: Post = { ...post, ...fields };
+  await env.BLOG_KV.put(`post:${slug}`, JSON.stringify(next));
+
+  const index = await getIndex(env);
+  const i = index.findIndex((m) => m.slug === slug);
+  if (i >= 0) {
+    index[i] = {
+      ...index[i],
+      title: next.title,
+      excerpt: next.excerpt,
+      chars: next.chars,
+      tags: next.tags,
+    };
+    await env.BLOG_KV.put(INDEX_KEY, JSON.stringify(index));
+  }
+  return next;
+}
+
+/** Delete a post, its images, and remove it from the index. */
+export async function deletePost(env: Env, slug: string): Promise<void> {
+  const post = await getPost(env, slug);
+  await env.BLOG_KV.delete(`post:${slug}`);
+  await env.BLOG_KV.delete(`img:${slug}`);
+  // Inline images are capped low; clear a safe range even if the count is lost.
+  const inline = Math.max(post?.inlineImages ?? 0, 8);
+  for (let i = 1; i <= inline; i++) await env.BLOG_KV.delete(`img:${slug}:${i}`);
+
+  const index = await getIndex(env);
+  await env.BLOG_KV.put(INDEX_KEY, JSON.stringify(index.filter((m) => m.slug !== slug)));
 }

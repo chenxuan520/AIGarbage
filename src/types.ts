@@ -24,8 +24,18 @@ export interface Env {
   SITE_TITLE: string;
   SITE_DESC: string;
 
-  // Secret. Set via `wrangler secret put ADMIN_KEY`.
+  // Secret. Set via `wrangler secret put ADMIN_KEY`. Also used to sign sessions.
   ADMIN_KEY?: string;
+
+  // Admin login. Defaults: user "admin", pass "admin888" (demo). Override
+  // ADMIN_PASS via `wrangler secret put ADMIN_PASS` in production.
+  ADMIN_USER?: string;
+  ADMIN_PASS?: string;
+
+  // Cloudflare Turnstile (human check). Defaults to the always-pass TEST keys
+  // so login works out of the box; replace with real keys for production.
+  TURNSTILE_SITE_KEY?: string;
+  TURNSTILE_SECRET_KEY?: string;
 }
 
 /** A single trending item returned by a data source. */
@@ -72,6 +82,8 @@ export interface PostMeta {
   inlineImages?: number;
   /** Short plain-text summary for listing pages. */
   excerpt?: string;
+  /** Chinese character count of the body, used for reading-time/stats. */
+  chars?: number;
   source?: PostSource;
 }
 

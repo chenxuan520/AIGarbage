@@ -1,3 +1,4 @@
+import type { GenConfig } from "./config";
 import type { ChatMessage } from "./prompts";
 import type { Env } from "./types";
 
@@ -29,13 +30,50 @@ function extractText(res: unknown): string {
   return "";
 }
 
-/** Run a text-generation model and return the response string. */
+/** Call a user-supplied OpenAI-compatible chat-completions endpoint. */
+async function runOpenAICompatible(
+  cfg: GenConfig,
+  model: string,
+  messages: ChatMessage[],
+  maxTokens: number,
+): Promise<string> {
+  const base = cfg.apiBaseUrl.replace(/\/+$/, "");
+  const res = await fetch(`${base}/chat/completions`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      authorization: `Bearer ${cfg.apiKey}`,
+    },
+    body: JSON.stringify({
+      model,
+      messages,
+      max_tokens: maxTokens,
+      temperature: 0.7,
+      top_p: 0.9,
+    }),
+  });
+  if (!res.ok) {
+    const detail = await res.text().catch(() => "");
+    throw new Error(`custom model HTTP ${res.status}: ${detail.slice(0, 300)}`);
+  }
+  return extractText(await res.json());
+}
+
+/**
+ * Run a text-generation model and return the response string. Routes to a
+ * custom OpenAI-compatible endpoint when `cfg.provider === "openai"`,
+ * otherwise uses the Workers AI binding.
+ */
 export async function runText(
   env: Env,
   model: string,
   messages: ChatMessage[],
   maxTokens = 1024,
+  cfg?: GenConfig,
 ): Promise<string> {
+  if (cfg?.provider === "openai" && cfg.apiBaseUrl) {
+    return runOpenAICompatible(cfg, model, messages, maxTokens);
+  }
   // Workers AI types are strict about model ids; cast to keep them configurable.
   const ai = env.AI as unknown as {
     run: (model: string, inputs: Record<string, unknown>) => Promise<unknown>;
@@ -52,14 +90,18 @@ export async function runText(
   return extractText(res);
 }
 
-/** Generate a cover image and return raw bytes (jpeg). */
-export async function generateImageBytes(env: Env, prompt: string): Promise<Uint8Array> {
+/** Generate a cover image and return raw bytes (jpeg). Always uses Workers AI. */
+export async function generateImageBytes(
+  env: Env,
+  prompt: string,
+  model = env.AI_MODEL_IMAGE,
+): Promise<Uint8Array> {
   const width = parseInt(env.IMAGE_WIDTH || "1024", 10);
   const height = parseInt(env.IMAGE_HEIGHT || "576", 10);
   const ai = env.AI as unknown as {
     run: (model: string, inputs: Record<string, unknown>) => Promise<{ image?: string }>;
   };
-  const res = await ai.run(env.AI_MODEL_IMAGE, {
+  const res = await ai.run(model, {
     prompt,
     width,
     height,

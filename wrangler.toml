@@ -8,11 +8,11 @@ kv_namespaces = [
   { binding = "BLOG_KV", id = "d06612ad4b964850af08caa12209cfeb" }
 ]
 
-# Custom domain on a VERIFIED-UNUSED subdomain (workers.dev is reset on this
-# network). Checked against all Worker routes, Worker custom domains and Pages
-# domains before binding; wrangler creates a clean DNS record + cert for it.
+# Custom domain on a VERIFIED-UNUSED subdomain. Audited against all DNS records,
+# Worker routes and Worker custom domains before binding (zhijian = 智见 pinyin,
+# avoids the obviously-AI "aigarbage" name). Wrangler creates a clean DNS + cert.
 routes = [
-  { pattern = "aigarbage.011203.dpdns.org", custom_domain = true }
+  { pattern = "zhijian.011203.dpdns.org", custom_domain = true }
 ]
 
 # Workers AI binding (text + image). No API key needed.
@@ -47,6 +47,15 @@ WRITE_MAX_TOKENS = "4096"
 SITE_TITLE = "智见"
 SITE_DESC = "洞察前沿热点，解读时代趋势"
 
-# ADMIN_KEY is a secret (protects /admin/generate):
+# Admin console login. Demo: user "admin" / pass "admin888".
+# Override the password in production with: wrangler secret put ADMIN_PASS
+ADMIN_USER = "admin"
+# Cloudflare Turnstile (login human check). Real keys are stored as SECRETS
+# (never committed):
+#   wrangler secret put TURNSTILE_SITE_KEY
+#   wrangler secret put TURNSTILE_SECRET_KEY
+# If unset, the code falls back to Cloudflare's always-pass TEST keys.
+
+# ADMIN_KEY is a secret (protects /admin/generate, also signs sessions):
 #   wrangler secret put ADMIN_KEY
 # For local dev put it in .dev.vars

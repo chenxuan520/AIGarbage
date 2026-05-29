@@ -11,7 +11,8 @@
     "tail": "wrangler tail"
   },
   "dependencies": {
-    "marked": "^18.0.4"
+    "marked": "^18.0.4",
+    "qrcode-svg": "^1.1.0"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20260529.1",
