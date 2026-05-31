@@ -708,11 +708,6 @@ export async function renderPost(env: Env, slug: string): Promise<Response> {
   const cover = post.hasCover
     ? `<figure class="cover-fig"><img src="/img/${encodeURIComponent(slug)}" alt=""></figure>`
     : "";
-  const source = post.source?.url
-    ? `<p class="src">信息来源:<a href="${escHtml(
-        post.source.url,
-      )}" rel="nofollow noopener" target="_blank">${escHtml(post.source.title)}</a></p>`
-    : "";
 
   // Related: same category first, then fill with latest.
   const sameCat = index.filter((m) => m.slug !== slug && categoryOf(m) === cat);
@@ -731,7 +726,6 @@ export async function renderPost(env: Env, slug: string): Promise<Response> {
   }</span></div>
   ${cover}
   <article class="article">${content}</article>
-  ${source}
   <a class="back" href="/">&larr; 返回首页</a>
 </main>`;
 

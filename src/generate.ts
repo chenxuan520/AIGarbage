@@ -1,10 +1,12 @@
 import { generateImageBytes, parseJsonLoose, runText } from "./ai";
 import { getConfig, type GenConfig } from "./config";
 import {
+  buildClosingMessages,
   buildContinuationMessages,
   buildReviewMessages,
   buildReviseMessages,
   buildSelectMessages,
+  buildStoryMessages,
   buildWriteMessages,
 } from "./prompts";
 import { fetchSourceContent, getSources } from "./sources";
@@ -135,12 +137,13 @@ async function collectCandidates(env: Env): Promise<NewsItem[]> {
   return items;
 }
 
-// Style suffix: clean, professional, photojournalistic — and aggressively
-// text-free (diffusion models love to scribble garbled letters otherwise).
+// Style suffix: clean, photojournalistic look. NOTE: we deliberately do NOT
+// say "no text" here — FLUX-schnell ignores negative phrasing and the tokens
+// "text/words/letters" actually make it scribble garbled glyphs. Text is
+// avoided instead by steering prompts away from text-bearing subjects.
 const IMAGE_STYLE =
-  ", professional editorial news photography, realistic, clean composition, " +
-  "natural lighting, high detail, high quality, " +
-  "no text, no words, no letters, no numbers, no captions, no watermark, no logo, no signage";
+  ", professional editorial news photography, photorealistic, candid real-world scene, " +
+  "cinematic natural lighting, shallow depth of field, clean minimal composition, high detail, 35mm";
 
 function imageCount(cfg: GenConfig): number {
   return Math.min(Math.max(1, cfg.imageCount || 5), 6);
@@ -150,10 +153,10 @@ function imageCount(cfg: GenConfig): number {
 function padPrompts(prompts: string[], n: number, title: string): string[] {
   const out = prompts.filter(Boolean).slice(0, n);
   const generic = [
-    `a realistic professional editorial photo illustrating "${title}", no text`,
-    `a clean documentary-style scene related to "${title}", no text`,
-    `a professional news illustration about "${title}", no text`,
-    `a realistic depiction of the topic "${title}", no text`,
+    `a realistic candid documentary photograph evoking "${title}", real people and environment`,
+    `a cinematic editorial photo capturing the mood of "${title}"`,
+    `a photorealistic real-world scene related to "${title}"`,
+    `a professional photojournalistic shot illustrating "${title}"`,
   ];
   let i = 0;
   while (out.length < n) out.push(generic[i++ % generic.length]);
@@ -258,6 +261,33 @@ async function writeMore(
   return stripArtifacts(md).replace(/^\s*#\s+[^\n]*\n?/, "").trim();
 }
 
+// Strip <think> blocks and any stray H1 (body fragments must not add a title).
+function cleanFragment(md: string): string {
+  return stripArtifacts(md).replace(/^\s*#\s+[^\n]*\n?/, "").trim();
+}
+
+/** Writing agent: the middle ~1500-char character story (engagement core). */
+async function writeStory(
+  env: Env,
+  sel: TopicSelection,
+  cfg: GenConfig,
+  reference = "",
+): Promise<string> {
+  const md = await runText(env, cfg.modelWrite, buildStoryMessages(sel, reference), cfg.writeMaxTokens, cfg);
+  return cleanFragment(md);
+}
+
+/** Writing agent: the closing (impact + analysis + punchy ending), once. */
+async function writeClosing(
+  env: Env,
+  sel: TopicSelection,
+  cfg: GenConfig,
+  reference = "",
+): Promise<string> {
+  const md = await runText(env, cfg.modelWrite, buildClosingMessages(sel, reference), cfg.writeMaxTokens, cfg);
+  return cleanFragment(md);
+}
+
 interface Review {
   pass: boolean;
   problems: string[];
@@ -315,28 +345,28 @@ async function writeWithHarness(
   reference = "",
 ): Promise<{ markdown: string; review: Review; chars: number }> {
   const min = cfg.minChars;
-  const maxRounds = parseInt(env.REVIEW_MAX_REVISIONS || "6", 10);
 
-  let md = dedupeParagraphs(await writeArticle(env, sel, cfg, reference));
+  // Three distinct parts generated in parallel; the human story sits in the
+  // middle: 开头(钩子+背景+矛盾) -> 人物故事(~1500字) -> 结尾(影响+分析). This
+  // fixed skeleton is what makes articles engaging AND kills the old
+  // continuation-loop repetition (same sections written over and over).
+  const [intro, story, closing] = await Promise.all([
+    writeArticle(env, sel, cfg, reference),
+    writeStory(env, sel, cfg, reference),
+    writeClosing(env, sel, cfg, reference),
+  ]);
+  let md = dedupeParagraphs([intro, story, closing].filter(Boolean).join("\n\n"));
+  console.log(
+    `draft: intro=${countCjk(intro)} story=${countCjk(story)} closing=${countCjk(closing)} total=${countCjk(md)}`,
+  );
 
-  // 1) Keep continuing until we reach the minimum *unique* length.
-  for (let round = 0; round < maxRounds && countCjk(md) < min; round++) {
-    const prev = countCjk(md);
+  // Single, non-looping extension only if we're clearly under target.
+  if (countCjk(md) < min) {
     const more = await writeMore(env, sel, md, cfg, reference);
-    if (!more) break;
-    md = dedupeParagraphs(`${md}\n\n${more}`);
-    const now = countCjk(md);
-    console.log(`extend round ${round + 1}: chars=${now}`);
-    // Model added (almost) nothing new -> it is looping; stop.
-    if (now <= prev + 60) {
-      console.log("continuation added little new content; stopping");
-      break;
-    }
+    if (more) md = dedupeParagraphs(`${md}\n\n${more}`);
+    console.log(`extended once: total=${countCjk(md)}`);
   }
 
-  // 2) Reviewer audit. Length is already enforced via continuation above; we
-  // deliberately do NOT auto-rewrite (a full rewrite of a long article is slow
-  // and rarely worth it). The verdict is logged/returned for visibility.
   const review = await reviewArticle(env, md, cfg);
   console.log(`review: pass=${review.pass} chars=${countCjk(md)} problems=${review.problems.join("; ")}`);
 

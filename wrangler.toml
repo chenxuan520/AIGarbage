@@ -19,7 +19,8 @@ routes = [
 [ai]
 binding = "AI"
 
-# Scheduled generation: one article every 12 hours (00:00 and 12:00 UTC).
+# Scheduled generation: two articles/day at 00:00 and 12:00 UTC. One 70B
+# article ~= 1.8k neurons, so 2/day (~3.6k) sits well under the free 10k/day cap.
 [triggers]
 crons = ["0 */12 * * *"]
 
@@ -27,16 +28,19 @@ crons = ["0 */12 * * *"]
 NEWS_API_BASE = "https://news.011203.xyz"
 # Comma-separated newsnow source ids. Add as many as you like.
 SOURCES = "huxiu,zhihu,36kr,weibo,baidu,ithome,wallstreetcn"
-# All text agents use a large dense model: robust on long generations (no
-# repeat-loops, no word-salad), coherent Chinese. Qwen3-a3b was tried but its
-# tiny active param count made it degenerate on long output.
+# High-quality 70B for all text agents (user preference). Note: one long
+# article (~6.7k neurons text + ~2.7k images) sits close to the FREE-tier
+# 10,000 neurons/day cap, so heavy extra usage in a day can exhaust it. For
+# more headroom: configure a custom model in /admin or upgrade to Workers Paid.
 AI_MODEL_SELECT = "@cf/meta/llama-3.3-70b-instruct-fp8-fast"
 AI_MODEL_WRITE = "@cf/meta/llama-3.3-70b-instruct-fp8-fast"
 AI_MODEL_REVIEW = "@cf/meta/llama-3.3-70b-instruct-fp8-fast"
 # Cover-image agent.
 AI_MODEL_IMAGE = "@cf/black-forest-labs/flux-1-schnell"
-# Minimum Chinese characters; the harness keeps extending until this is met.
-MIN_CHARS = "4000"
+# Minimum Chinese characters. Kept moderate on purpose: the 3-part skeleton
+# (hook+background -> ~1500-char human story -> impact/closing) is usually
+# ~2.5k-4k already; a low floor avoids padding it with repetitive filler.
+MIN_CHARS = "2500"
 # Max continuation rounds used to reach MIN_CHARS.
 REVIEW_MAX_REVISIONS = "4"
 IMAGE_WIDTH = "1024"
