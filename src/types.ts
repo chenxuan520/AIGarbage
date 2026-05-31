@@ -36,6 +36,12 @@ export interface Env {
   // so login works out of the box; replace with real keys for production.
   TURNSTILE_SITE_KEY?: string;
   TURNSTILE_SECRET_KEY?: string;
+
+  // Feishu/Lark custom-bot webhook for failure alerts. Set as secrets:
+  //   wrangler secret put LARK_WEBHOOK_URL
+  //   wrangler secret put LARK_WEBHOOK_SECRET   (optional, only if 加签 enabled)
+  LARK_WEBHOOK_URL?: string;
+  LARK_WEBHOOK_SECRET?: string;
 }
 
 /** A single trending item returned by a data source. */

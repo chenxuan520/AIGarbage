@@ -10,6 +10,7 @@ import {
 } from "./admin";
 import { isAuthed } from "./auth";
 import { runGeneration } from "./generate";
+import { notifyLark } from "./notify";
 import { renderQr } from "./qr";
 import { fetchSourceContent } from "./sources";
 import {
@@ -25,6 +26,11 @@ import type { Env } from "./types";
 
 function redirect(location: string): Response {
   return new Response(null, { status: 302, headers: { Location: location } });
+}
+
+function errStr(e: unknown): string {
+  const err = e as Error;
+  return String(err?.message || err).slice(0, 800);
 }
 
 export default {
@@ -90,6 +96,17 @@ export default {
         );
         return Response.json({ len: text.length, sample: text.slice(0, 800) });
       }
+      if (path === "/admin/test-notify") {
+        const keyOk = !!env.ADMIN_KEY && url.searchParams.get("key") === env.ADMIN_KEY;
+        if (!keyOk && !(await isAuthed(request, env))) {
+          return new Response("Forbidden", { status: 403 });
+        }
+        if (!env.LARK_WEBHOOK_URL) {
+          return Response.json({ ok: false, configured: false, hint: "LARK_WEBHOOK_URL 未设置" });
+        }
+        await notifyLark(env, "测试通知", "这是一条测试告警，收到说明飞书 webhook 配置成功。");
+        return Response.json({ ok: true, configured: true });
+      }
 
       if (path === "/admin/generate") {
         const keyOk = !!env.ADMIN_KEY && url.searchParams.get("key") === env.ADMIN_KEY;
@@ -101,17 +118,26 @@ export default {
         // background and bounce back to the dashboard immediately.
         if (authed && !keyOk) {
           ctx.waitUntil(
-            runGeneration(env)
-              .then((r) => console.log("admin generation:", JSON.stringify(r)))
-              .catch((e) => console.error("admin generation error:", e)),
+            (async () => {
+              try {
+                const r = await runGeneration(env);
+                if (r) console.log("admin generation:", JSON.stringify(r));
+                else await notifyLark(env, "手动生成未产出文章", "无候选 / 全部重复 / 返回空。");
+              } catch (e) {
+                console.error("admin generation error:", e);
+                await notifyLark(env, "手动生成失败", errStr(e));
+              }
+            })(),
           );
           return redirect("/admin?gen=ok");
         }
         // Programmatic trigger (ADMIN_KEY): synchronous JSON result.
         try {
           const result = await runGeneration(env);
+          if (!result) ctx.waitUntil(notifyLark(env, "手动生成未产出文章", "无候选 / 全部重复 / 返回空。"));
           return Response.json({ ok: !!result, result });
         } catch (e) {
+          ctx.waitUntil(notifyLark(env, "手动生成失败", errStr(e)));
           const err = e as Error;
           return Response.json(
             { ok: false, error: String(err?.stack || err?.message || err) },
@@ -129,9 +155,24 @@ export default {
 
   async scheduled(_event: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
     ctx.waitUntil(
-      runGeneration(env)
-        .then((r) => console.log("scheduled generation:", JSON.stringify(r)))
-        .catch((e) => console.error("scheduled generation error:", e)),
+      (async () => {
+        try {
+          const r = await runGeneration(env);
+          if (r) {
+            console.log("scheduled generation:", JSON.stringify(r));
+          } else {
+            console.warn("scheduled generation produced no article");
+            await notifyLark(
+              env,
+              "定时生成未产出文章",
+              "可能原因：无候选 / 全部为近期重复选题 / 模型返回空。请检查数据源与模型配置。",
+            );
+          }
+        } catch (e) {
+          console.error("scheduled generation error:", e);
+          await notifyLark(env, "定时生成失败", errStr(e));
+        }
+      })(),
     );
   },
 } satisfies ExportedHandler<Env>;
