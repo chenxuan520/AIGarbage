@@ -3,14 +3,16 @@ import { getConfig, type GenConfig } from "./config";
 import {
   buildClosingMessages,
   buildContinuationMessages,
+  buildImagePromptMessages,
   buildReviewMessages,
   buildReviseMessages,
   buildSelectMessages,
   buildStoryMessages,
   buildWriteMessages,
 } from "./prompts";
+import { notifyLark } from "./notify";
 import { fetchSourceContent, getSources } from "./sources";
-import { getIndex, savePost, slugify } from "./store";
+import { getIndex, logRejection, savePost, slugify } from "./store";
 import type { Env, NewsItem, Post, PostSource, TopicSelection } from "./types";
 
 function countCjk(s: string): number {
@@ -19,7 +21,13 @@ function countCjk(s: string): number {
 }
 
 function stripArtifacts(md: string): string {
-  return md.replace(/<think>[\s\S]*?<\/think>/gi, "").trim();
+  let out = md;
+  const m = out.match(/<[^>]*end[\s_▁｜|]*of[\s_▁｜|]*think(?:ing)?[^>]*>/i);
+  if (m && m.index !== undefined) out = out.slice(m.index + m[0].length);
+  return out
+    .replace(/<think>[\s\S]*?<\/think>/gi, "")
+    .replace(/<thought>[\s\S]*?<\/thought>/gi, "")
+    .trim();
 }
 
 // Plain-text summary (first sentence-ish) for listing pages.
@@ -266,36 +274,42 @@ function cleanFragment(md: string): string {
   return stripArtifacts(md).replace(/^\s*#\s+[^\n]*\n?/, "").trim();
 }
 
-/** Writing agent: the middle ~1500-char character story (engagement core). */
+/** Writing agent: the middle bizarre character story (~1500-1700字). */
 async function writeStory(
   env: Env,
   sel: TopicSelection,
   cfg: GenConfig,
   reference = "",
 ): Promise<string> {
-  const md = await runText(env, cfg.modelWrite, buildStoryMessages(sel, reference), cfg.writeMaxTokens, cfg);
+  const tokens = Math.max(cfg.writeMaxTokens, 5000);
+  const md = await runText(env, cfg.modelWrite, buildStoryMessages(sel, reference), tokens, cfg);
   return cleanFragment(md);
 }
 
-/** Writing agent: the closing (impact + analysis + punchy ending), once. */
+/** Writing agent: the closing — a ~2000字 deep, resonant argument. Needs the
+ *  biggest token budget of the three parts so it isn't cut off mid-sentence. */
 async function writeClosing(
   env: Env,
   sel: TopicSelection,
   cfg: GenConfig,
   reference = "",
 ): Promise<string> {
-  const md = await runText(env, cfg.modelWrite, buildClosingMessages(sel, reference), cfg.writeMaxTokens, cfg);
+  const tokens = Math.max(cfg.writeMaxTokens, 6000);
+  const md = await runText(env, cfg.modelWrite, buildClosingMessages(sel, reference), tokens, cfg);
   return cleanFragment(md);
 }
 
 interface Review {
-  pass: boolean;
+  ok: boolean; // reviewer ran AND returned a parseable verdict
+  score: number; // 0-100
   problems: string[];
   suggestion: string;
   wordCount: number;
 }
 
-/** Review/harness agent: audit the draft. */
+/** Review/harness agent: score the draft (0-100). Returns ok=false if the
+ *  reviewer call/parse failed (e.g. quota error) so callers can tell "didn't
+ *  run" apart from "scored low". */
 export async function reviewArticle(
   env: Env,
   markdown: string,
@@ -308,12 +322,17 @@ export async function reviewArticle(
     600,
     cfg,
   );
-  const p = parseJsonLoose<Record<string, unknown>>(text) ?? {};
+  const p = parseJsonLoose<Record<string, unknown>>(text);
+  // A real verdict has a numeric `score`. Anything else (empty/garbled/error
+  // JSON) means the review did not actually complete.
+  const ok = !!p && typeof p.score === "number" && Number.isFinite(p.score as number);
+  const score = ok ? Math.min(100, Math.max(0, Math.round(p!.score as number))) : 0;
   return {
-    pass: p.pass === true,
-    problems: Array.isArray(p.problems) ? (p.problems as unknown[]).map(String) : [],
-    suggestion: p.suggestion ? String(p.suggestion) : "",
-    wordCount: typeof p.wordCount === "number" ? (p.wordCount as number) : 0,
+    ok,
+    score,
+    problems: Array.isArray(p?.problems) ? (p?.problems as unknown[]).map(String) : [],
+    suggestion: p?.suggestion ? String(p.suggestion) : "",
+    wordCount: typeof p?.wordCount === "number" ? (p?.wordCount as number) : countCjk(markdown),
   };
 }
 
@@ -367,8 +386,18 @@ async function writeWithHarness(
     console.log(`extended once: total=${countCjk(md)}`);
   }
 
-  const review = await reviewArticle(env, md, cfg);
-  console.log(`review: pass=${review.pass} chars=${countCjk(md)} problems=${review.problems.join("; ")}`);
+  // A review hiccup (quota/parse error) must NEVER discard a written article;
+  // catch it and mark the verdict as "not completed" instead.
+  let review: Review;
+  try {
+    review = await reviewArticle(env, md, cfg);
+  } catch (e) {
+    console.error("review call threw:", e);
+    review = { ok: false, score: 0, problems: [], suggestion: "", wordCount: countCjk(md) };
+  }
+  console.log(
+    `review: ok=${review.ok} score=${review.score} chars=${countCjk(md)} problems=${review.problems.join("; ")}`,
+  );
 
   return { markdown: md, review, chars: countCjk(md) };
 }
@@ -383,6 +412,41 @@ async function generateOne(env: Env, prompt: string, model: string): Promise<Uin
     }
   }
   return null;
+}
+
+/**
+ * Derive image prompts from the FINISHED article so the pictures actually match
+ * the content. Falls back to the (headline-time) selection prompts on failure.
+ */
+async function deriveImagePrompts(
+  env: Env,
+  sel: TopicSelection,
+  body: string,
+  cfg: GenConfig,
+): Promise<string[]> {
+  const want = imageCount(cfg);
+  try {
+    // Use the (cheaper) write model — this is a short JSON task and we want to
+    // spare the neuron budget vs. the heavier select model.
+    const text = await runText(
+      env,
+      cfg.modelWrite,
+      buildImagePromptMessages(sel.chosenTitle, body, want),
+      700,
+      cfg,
+    );
+    const parsed = parseJsonLoose<{ imagePrompts?: unknown }>(text);
+    const arr = Array.isArray(parsed?.imagePrompts)
+      ? (parsed?.imagePrompts as unknown[]).map((x) => String(x)).filter(Boolean)
+      : [];
+    if (arr.length) {
+      console.log(`image prompts: ${arr.length} grounded in article`);
+      return padPrompts(arr, want, sel.chosenTitle);
+    }
+  } catch (e) {
+    console.error("derive image prompts failed; using selection prompts:", e);
+  }
+  return padPrompts(sel.imagePrompts ?? [], want, sel.chosenTitle);
 }
 
 /** Agent 3: generate several exaggerated images; returns only successful ones. */
@@ -416,19 +480,27 @@ function toPostSource(item: NewsItem | undefined): PostSource | undefined {
   return item ? { id: item.source ?? "", title: item.title, url: item.url } : undefined;
 }
 
-/** Full pipeline: collect -> select -> write -> illustrate -> store. */
-export async function runGeneration(env: Env): Promise<{
-  slug: string;
-  title: string;
-  images: number;
-  chars: number;
-  reviewPass: boolean;
-} | null> {
+/** Outcome of one generation run (never throws to a null for the gated path). */
+export type GenOutcome =
+  | {
+      kind: "published";
+      slug: string;
+      title: string;
+      images: number;
+      chars: number;
+      score: number;
+      reviewPass: boolean | null; // null = review didn't run (published anyway)
+    }
+  | { kind: "rejected"; title: string; score: number; threshold: number; problems: string[] }
+  | { kind: "none"; reason: string };
+
+/** Full pipeline: collect -> select -> write -> review/gate -> illustrate -> store. */
+export async function runGeneration(env: Env): Promise<GenOutcome> {
   const cfg = await getConfig(env);
   const [candidates, recent] = await Promise.all([collectCandidates(env), getRecentContext(env, 30)]);
   if (candidates.length === 0) {
     console.error("no candidates from any source; aborting");
-    return null;
+    return { kind: "none", reason: "无候选(数据源全部失败或为空)" };
   }
 
   const selection = await selectTopic(env, candidates, cfg, recent);
@@ -441,17 +513,13 @@ export async function runGeneration(env: Env): Promise<{
     `reference: ${reference ? `${reference.length} chars from ${sourceItem?.source}` : "none (headline-only)"}`,
   );
 
-  // Images only depend on the selection (not the article body), so generate
-  // them concurrently with the (slow) write+review+extend harness.
-  const [harness, images] = await Promise.all([
-    writeWithHarness(env, selection, cfg, reference),
-    generateImages(env, selection.imagePrompts, cfg.modelImage),
-  ]);
-
+  // Write first: images must be grounded in the ACTUAL article body, and we
+  // don't want to spend neurons illustrating a draft that fails the gate.
+  const harness = await writeWithHarness(env, selection, cfg, reference);
   const markdown = harness.markdown;
   if (!markdown) {
     console.error("writer returned empty markdown; aborting");
-    return null;
+    return { kind: "none", reason: "写作返回空内容" };
   }
 
   const title = extractTitle(markdown, selection.chosenTitle);
@@ -460,11 +528,41 @@ export async function runGeneration(env: Env): Promise<{
   // (guards against cron/manual runs racing on the same hot topic).
   if (isTooSimilar(title, recent.titles)) {
     console.warn(`skip save: "${title}" duplicates a recent topic`);
-    return null;
+    return { kind: "none", reason: `选题与近期文章重复:${title}` };
   }
 
-  const slug = slugify(title);
+  const rv = harness.review;
+  const threshold = cfg.reviewMinScore;
 
+  // Quality gate. A genuinely low score blocks publishing. A review that did
+  // NOT run (ok=false — e.g. the Workers AI quota glitch) must not silently
+  // kill output, so we publish anyway and flag it as 未审 (reviewPass=null).
+  if (rv.ok && rv.score < threshold) {
+    console.warn(`rejected: "${title}" score=${rv.score} < ${threshold}`);
+    await logRejection(env, {
+      date: new Date().toISOString(),
+      title,
+      score: rv.score,
+      problems: rv.problems,
+      suggestion: rv.suggestion,
+    });
+    await notifyLark(
+      env,
+      `文章未过审 未发布（${rv.score}/${threshold}）`,
+      `**标题**：${title}\n**评分**：${rv.score} / 阈值 ${threshold}\n**问题**：${
+        rv.problems.length ? rv.problems.map((p) => `\n- ${p}`).join("") : "无"
+      }${rv.suggestion ? `\n**建议**：${rv.suggestion}` : ""}`,
+    );
+    return { kind: "rejected", title, score: rv.score, threshold, problems: rv.problems };
+  }
+
+  const reviewPass = rv.ok ? true : null;
+
+  // Cleared the gate — now spend neurons on illustration grounded in the body.
+  const imgPrompts = await deriveImagePrompts(env, selection, markdown, cfg);
+  const images = await generateImages(env, imgPrompts, cfg.modelImage);
+
+  const slug = slugify(title);
   const post: Post = {
     slug,
     title,
@@ -475,18 +573,40 @@ export async function runGeneration(env: Env): Promise<{
     excerpt: makeExcerpt(markdown),
     chars: harness.chars,
     source: toPostSource(sourceItem),
+    reviewPass,
+    reviewScore: rv.ok ? rv.score : undefined,
+    review: {
+      ok: rv.ok,
+      score: rv.score,
+      pass: rv.ok ? rv.score >= threshold : false,
+      wordCount: rv.wordCount,
+      problems: rv.problems,
+      suggestion: rv.suggestion,
+    },
     markdown,
   };
 
   await savePost(env, post, images);
   console.log(
-    `generated: ${slug} (chars=${harness.chars}, images=${images.length}, pass=${harness.review.pass})`,
+    `generated: ${slug} (chars=${harness.chars}, images=${images.length}, score=${rv.score}, reviewPass=${reviewPass})`,
   );
+
+  // Review couldn't run but we published anyway — let the operator know.
+  if (reviewPass === null) {
+    await notifyLark(
+      env,
+      "审稿未运行 已照常发布",
+      `**标题**：${title}\n审稿模型未返回有效评分（可能是额度异常），文章已照常发布，请留意质量。`,
+    );
+  }
+
   return {
+    kind: "published",
     slug,
     title,
     images: images.length,
     chars: harness.chars,
-    reviewPass: harness.review.pass,
+    score: rv.score,
+    reviewPass,
   };
 }

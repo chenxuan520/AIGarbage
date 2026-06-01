@@ -43,6 +43,9 @@ AI_MODEL_IMAGE = "@cf/black-forest-labs/flux-1-schnell"
 MIN_CHARS = "2500"
 # Max continuation rounds used to reach MIN_CHARS.
 REVIEW_MAX_REVISIONS = "4"
+# Reviewer scores each article 0-100; below this it is NOT published and a Lark
+# alert is sent. Editable at runtime in /admin. Kept lenient for now.
+REVIEW_MIN_SCORE = "60"
 IMAGE_WIDTH = "1024"
 IMAGE_HEIGHT = "576"
 # Images per article (1 cover + the rest inline). Capped at 6.

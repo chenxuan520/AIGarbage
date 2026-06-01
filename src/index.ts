@@ -121,8 +121,9 @@ export default {
             (async () => {
               try {
                 const r = await runGeneration(env);
-                if (r) console.log("admin generation:", JSON.stringify(r));
-                else await notifyLark(env, "手动生成未产出文章", "无候选 / 全部重复 / 返回空。");
+                // "rejected" already pushed its own Feishu alert inside runGeneration.
+                if (r.kind === "none") await notifyLark(env, "手动生成未产出文章", r.reason);
+                else console.log("admin generation:", JSON.stringify(r));
               } catch (e) {
                 console.error("admin generation error:", e);
                 await notifyLark(env, "手动生成失败", errStr(e));
@@ -134,8 +135,10 @@ export default {
         // Programmatic trigger (ADMIN_KEY): synchronous JSON result.
         try {
           const result = await runGeneration(env);
-          if (!result) ctx.waitUntil(notifyLark(env, "手动生成未产出文章", "无候选 / 全部重复 / 返回空。"));
-          return Response.json({ ok: !!result, result });
+          if (result.kind === "none") {
+            ctx.waitUntil(notifyLark(env, "手动生成未产出文章", result.reason));
+          }
+          return Response.json({ ok: result.kind === "published", result });
         } catch (e) {
           ctx.waitUntil(notifyLark(env, "手动生成失败", errStr(e)));
           const err = e as Error;
@@ -158,15 +161,14 @@ export default {
       (async () => {
         try {
           const r = await runGeneration(env);
-          if (r) {
+          if (r.kind === "published") {
             console.log("scheduled generation:", JSON.stringify(r));
+          } else if (r.kind === "rejected") {
+            // Feishu alert already sent inside runGeneration.
+            console.warn(`scheduled: rejected "${r.title}" score=${r.score}/${r.threshold}`);
           } else {
-            console.warn("scheduled generation produced no article");
-            await notifyLark(
-              env,
-              "定时生成未产出文章",
-              "可能原因：无候选 / 全部为近期重复选题 / 模型返回空。请检查数据源与模型配置。",
-            );
+            console.warn("scheduled generation produced no article:", r.reason);
+            await notifyLark(env, "定时生成未产出文章", r.reason);
           }
         } catch (e) {
           console.error("scheduled generation error:", e);

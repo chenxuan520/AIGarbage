@@ -15,6 +15,8 @@ export interface Env {
   // Minimum Chinese characters; reviewer/harness rejects shorter drafts.
   MIN_CHARS: string;
   REVIEW_MAX_REVISIONS: string;
+  // Reviewer score (0-100) an article must reach to be published.
+  REVIEW_MIN_SCORE?: string;
 
   IMAGE_WIDTH: string;
   IMAGE_HEIGHT: string;
@@ -80,6 +82,28 @@ export interface PostSource {
   url: string;
 }
 
+/** Reviewer (审稿员) verdict stored alongside a post. */
+export interface ReviewInfo {
+  /** Did the reviewer actually run AND return a parseable verdict? */
+  ok: boolean;
+  /** 0-100 quality score. Publish only if >= the configured threshold. */
+  score: number;
+  /** Convenience: score >= threshold (only meaningful when `ok`). */
+  pass: boolean;
+  wordCount: number;
+  problems: string[];
+  suggestion?: string;
+}
+
+/** A draft that failed review and was NOT published (kept for the admin log). */
+export interface Rejection {
+  date: string; // ISO timestamp
+  title: string;
+  score: number;
+  problems: string[];
+  suggestion?: string;
+}
+
 export interface PostMeta {
   slug: string;
   title: string;
@@ -93,8 +117,14 @@ export interface PostMeta {
   /** Chinese character count of the body, used for reading-time/stats. */
   chars?: number;
   source?: PostSource;
+  /** Compact reviewer verdict for list views: true=通过, false=未通过, null=未完成(出错/无法解析). */
+  reviewPass?: boolean | null;
+  /** Reviewer score (0-100) for list views. */
+  reviewScore?: number;
 }
 
 export interface Post extends PostMeta {
   markdown: string;
+  /** Full reviewer verdict (problems/suggestion) for the admin edit view. */
+  review?: ReviewInfo;
 }

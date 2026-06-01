@@ -20,6 +20,8 @@ export interface GenConfig {
   minChars: number;
   imageCount: number;
   writeMaxTokens: number;
+  /** Min reviewer score (0-100) required to publish. */
+  reviewMinScore: number;
 }
 
 const CONFIG_KEY = "config";
@@ -42,6 +44,7 @@ export function defaultConfig(env: Env): GenConfig {
     minChars: num(env.MIN_CHARS, 4000),
     imageCount: num(env.IMAGE_COUNT, 5),
     writeMaxTokens: num(env.WRITE_MAX_TOKENS, 4096),
+    reviewMinScore: num(env.REVIEW_MIN_SCORE, 90),
   };
 }
 
@@ -61,6 +64,7 @@ export async function getConfig(env: Env): Promise<GenConfig> {
 export async function saveConfig(env: Env, patch: Partial<GenConfig>): Promise<GenConfig> {
   const next: GenConfig = { ...(await getConfig(env)), ...patch };
   if (next.provider !== "openai") next.provider = "workers-ai";
+  next.reviewMinScore = Math.min(100, Math.max(0, Math.round(next.reviewMinScore)));
   await env.BLOG_KV.put(CONFIG_KEY, JSON.stringify(next));
   return next;
 }

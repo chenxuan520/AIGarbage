@@ -16,18 +16,43 @@ function maybeDisableThinking(model: string, messages: ChatMessage[]): ChatMessa
   return out;
 }
 
-// Handle both the classic `{response}` shape and the OpenAI-style
-// `{choices:[{message:{content}}]}` shape used by newer models.
+// Some reasoning models (GLM-4.x, etc.) may leak their chain-of-thought inline
+// as <think>/<thought> blocks or end it with a `<｜end▁of▁thinking｜>` marker.
+// Strip all of that so only the final answer survives.
+function stripReasoning(s: string): string {
+  let out = s;
+  // Everything up to and including an end-of-thinking marker is reasoning.
+  const m = out.match(/<[^>]*end[\s_▁｜|]*of[\s_▁｜|]*think(?:ing)?[^>]*>/i);
+  if (m && m.index !== undefined) out = out.slice(m.index + m[0].length);
+  out = out
+    .replace(/<think>[\s\S]*?<\/think>/gi, "")
+    .replace(/<thought>[\s\S]*?<\/thought>/gi, "");
+  return out.trim();
+}
+
+// Handle both the OpenAI-style `{choices:[{message:{content}}]}` shape used by
+// newer models and the classic `{response}` shape. IMPORTANT: read only the
+// `content` field — reasoning models keep their thinking in a separate
+// `reasoning`/`reasoning_content` field which we must ignore.
 function extractText(res: unknown): string {
   const r = res as {
     response?: unknown;
     choices?: Array<{ message?: { content?: unknown }; text?: unknown }>;
   };
-  if (typeof r?.response === "string") return r.response.trim();
   const choice = r?.choices?.[0];
-  if (typeof choice?.message?.content === "string") return choice.message.content.trim();
-  if (typeof choice?.text === "string") return choice.text.trim();
+  if (typeof choice?.message?.content === "string" && choice.message.content.trim()) {
+    return stripReasoning(choice.message.content);
+  }
+  if (typeof r?.response === "string" && r.response.trim()) return stripReasoning(r.response);
+  if (typeof choice?.text === "string") return stripReasoning(choice.text);
   return "";
+}
+
+// repetition_penalty destabilizes some reasoning models (notably GLM-4.x):
+// on long generations they hit the token cap and spiral into a garbled
+// English word-salad loop. Skip the penalty for those families.
+function usesRepetitionPenalty(model: string): boolean {
+  return !/(glm|deepseek-r1|qwq|gpt-oss)/i.test(model);
 }
 
 /** Call a user-supplied OpenAI-compatible chat-completions endpoint. */
@@ -78,15 +103,16 @@ export async function runText(
   const ai = env.AI as unknown as {
     run: (model: string, inputs: Record<string, unknown>) => Promise<unknown>;
   };
-  const res = await ai.run(model, {
+  const inputs: Record<string, unknown> = {
     messages: maybeDisableThinking(model, messages),
     max_tokens: maxTokens,
-    // Mild settings: enough to avoid loops, not so aggressive that the model
-    // produces incoherent word-salad (which heavy penalties caused on small MoEs).
     temperature: 0.7,
     top_p: 0.9,
-    repetition_penalty: 1.1,
-  });
+  };
+  // Mild penalty helps small MoEs avoid loops, but breaks GLM-style reasoning
+  // models — only send it where it's safe.
+  if (usesRepetitionPenalty(model)) inputs.repetition_penalty = 1.1;
+  const res = await ai.run(model, inputs);
   return extractText(res);
 }
 

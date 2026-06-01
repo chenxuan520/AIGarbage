@@ -1,7 +1,9 @@
-import type { Env, Post, PostMeta } from "./types";
+import type { Env, Post, PostMeta, Rejection } from "./types";
 
 const INDEX_KEY = "index";
 const INDEX_LIMIT = 1000;
+const REJECT_KEY = "rejections";
+const REJECT_LIMIT = 30;
 
 /** Build a URL-safe, collision-resistant slug (date + title + random). */
 export function slugify(title: string): string {
@@ -72,6 +74,8 @@ export async function savePost(
     excerpt: post.excerpt,
     chars: post.chars,
     source: post.source,
+    reviewPass: post.reviewPass,
+    reviewScore: post.reviewScore,
   };
   index.unshift(meta);
   await env.BLOG_KV.put(INDEX_KEY, JSON.stringify(index.slice(0, INDEX_LIMIT)));
@@ -101,6 +105,23 @@ export async function updatePost(
     await env.BLOG_KV.put(INDEX_KEY, JSON.stringify(index));
   }
   return next;
+}
+
+/** Record a draft that failed review (for the admin "未过审" log). */
+export async function logRejection(env: Env, rec: Rejection): Promise<void> {
+  const list = await getRejections(env);
+  list.unshift(rec);
+  await env.BLOG_KV.put(REJECT_KEY, JSON.stringify(list.slice(0, REJECT_LIMIT)));
+}
+
+export async function getRejections(env: Env): Promise<Rejection[]> {
+  const raw = await env.BLOG_KV.get(REJECT_KEY);
+  if (!raw) return [];
+  try {
+    return JSON.parse(raw) as Rejection[];
+  } catch {
+    return [];
+  }
 }
 
 /** Delete a post, its images, and remove it from the index. */

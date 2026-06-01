@@ -8,7 +8,7 @@ import {
   verifyTurnstile,
 } from "./auth";
 import { getConfig, saveConfig, type GenConfig } from "./config";
-import { deletePost, getIndex, getPost, updatePost } from "./store";
+import { deletePost, getIndex, getPost, getRejections, updatePost } from "./store";
 import type { Env } from "./types";
 
 // Curated Workers AI model ids offered as quick-switch suggestions.
@@ -86,6 +86,21 @@ textarea{min-height:420px;line-height:1.7;resize:vertical;font-family:ui-monospa
 .mini{font:inherit;font-size:12.5px;font-weight:700;border:1px solid var(--line);background:var(--bg);color:var(--ink2);border-radius:7px;padding:5px 11px;cursor:pointer;white-space:nowrap}
 .mini:hover{border-color:var(--accent);color:var(--accent)}
 .mini.del:hover{border-color:var(--accent);color:#fff;background:var(--accent)}
+.rv{font-size:11px;font-weight:800;padding:2px 8px;border-radius:6px;white-space:nowrap}
+.rv.ok{background:rgba(22,163,74,.14);color:var(--ok)}
+.rv.no{background:rgba(215,40,47,.14);color:var(--accent)}
+.rv.na{background:var(--bg);color:var(--muted);border:1px solid var(--line)}
+.review{margin:0 0 4px;padding:14px 16px;border-radius:10px;border:1px solid var(--line);background:var(--bg)}
+.review h3{margin:0 0 8px;font-size:14px;display:flex;align-items:center;gap:8px}
+.review ul{margin:8px 0 0;padding-left:18px}
+.review li{margin:3px 0;color:var(--ink2);font-size:13px}
+.review .sg{margin-top:8px;font-size:13px;color:var(--muted)}
+.rejlist{display:flex;flex-direction:column;gap:10px}
+.rj{border:1px solid var(--line);border-radius:10px;padding:11px 13px;background:var(--bg)}
+.rj-h{display:flex;align-items:center;gap:10px}
+.rj-t{flex:1;min-width:0;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.rj-p{margin-top:7px;font-size:12.5px;color:var(--ink2);line-height:1.7}
+.rj-s{margin-top:6px;font-size:12.5px;color:var(--muted)}
 .more-link{display:inline-block;margin-top:12px;font-size:13px;color:var(--muted)}
 `;
 
@@ -111,6 +126,14 @@ function redirect(location: string, cookie?: string): Response {
   const headers: Record<string, string> = { Location: location };
   if (cookie) headers["Set-Cookie"] = cookie;
   return new Response(null, { status: 302, headers });
+}
+
+// 3-state reviewer verdict badge for list views (shows the score when known).
+function reviewBadge(pass: boolean | null | undefined, score?: number): string {
+  const s = typeof score === "number" ? `${score} 分` : "";
+  if (pass === true) return `<span class="rv ok">${s || "通过"}</span>`;
+  if (pass === false) return `<span class="rv no">${s || "未过"}</span>`;
+  return `<span class="rv na" title="审稿未完成（出错/未运行/无法解析）">未审</span>`;
 }
 
 // ---- login ----
@@ -180,6 +203,7 @@ function textField(
 export async function renderDashboard(env: Env, request: Request): Promise<Response> {
   const cfg = await getConfig(env);
   const index = await getIndex(env);
+  const rejections = await getRejections(env);
   const url = new URL(request.url);
   const flag = (k: string) => url.searchParams.get(k) === "1";
   const flash = flag("saved")
@@ -198,7 +222,7 @@ export async function renderDashboard(env: Env, request: Request): Promise<Respo
       const slug = encodeURIComponent(m.slug);
       return `<div class="prow"><a class="pt" href="/post/${slug}" target="_blank">${esc(
         m.title,
-      )}</a><span class="pd">${esc(
+      )}</a>${reviewBadge(m.reviewPass, m.reviewScore)}<span class="pd">${esc(
         m.date.slice(0, 10),
       )}</span><a class="mini" href="/admin/edit?slug=${slug}">编辑</a><form method="post" action="/admin/delete" onsubmit="return confirm('确定删除这篇文章？删除后不可恢复。')"><input type="hidden" name="slug" value="${esc(
         m.slug,
@@ -209,8 +233,27 @@ export async function renderDashboard(env: Env, request: Request): Promise<Respo
     <h2>文章管理</h2>
     <p class="desc">编辑或删除已发布文章（共 ${index.length} 篇${
       index.length > recent.length ? `，显示最近 ${recent.length} 篇` : ""
-    }）。</p>
+    }）。徽章为审稿评分。</p>
     ${index.length ? `<div class="postlist">${postRows}</div>` : `<p class="note">还没有文章。</p>`}
+  </div>`;
+
+  const rejRows = rejections
+    .slice(0, 20)
+    .map((r) => {
+      const probs = r.problems?.length
+        ? `<div class="rj-p">${r.problems.map((p) => `· ${esc(p)}`).join("<br>")}</div>`
+        : "";
+      return `<div class="rj"><div class="rj-h"><span class="rv no">${r.score} 分</span><span class="rj-t">${esc(
+        r.title,
+      )}</span><span class="pd">${esc(r.date.slice(0, 10))}</span></div>${probs}${
+        r.suggestion ? `<div class="rj-s">建议：${esc(r.suggestion)}</div>` : ""
+      }</div>`;
+    })
+    .join("");
+  const rejected = `<div class="card">
+    <h2>未过审 · 未发布</h2>
+    <p class="desc">评分低于阈值（${cfg.reviewMinScore} 分）被拦截、未发布的文章，连同评分与问题记录在此。</p>
+    ${rejections.length ? `<div class="rejlist">${rejRows}</div>` : `<p class="note">暂无未过审记录。</p>`}
   </div>`;
 
   const isOpenAI = cfg.provider === "openai";
@@ -277,6 +320,13 @@ export async function renderDashboard(env: Env, request: Request): Promise<Respo
       ${textField("imageCount", "配图数量", String(cfg.imageCount), "1-6", "number")}
       ${textField("writeMaxTokens", "单次 max_tokens", String(cfg.writeMaxTokens), "", "number")}
     </div>
+    ${textField(
+      "reviewMinScore",
+      "审稿通过分",
+      String(cfg.reviewMinScore),
+      "0-100，审稿员评分低于此分则不发布，并推送飞书告警",
+      "number",
+    )}
 
     <div class="actions">
       <button class="btn" type="submit">保存配置</button>
@@ -291,6 +341,8 @@ export async function renderDashboard(env: Env, request: Request): Promise<Respo
   </form>
 
   ${manager}
+
+  ${rejected}
 </div>
 <script>
 (function(){var p=document.getElementById('provider'),f=document.getElementById('openaiFields');
@@ -318,6 +370,7 @@ export async function handleSave(env: Env, request: Request): Promise<Response> 
     minChars: int("minChars", 4000),
     imageCount: Math.min(6, Math.max(1, int("imageCount", 5))),
     writeMaxTokens: int("writeMaxTokens", 4096),
+    reviewMinScore: Math.min(100, Math.max(0, int("reviewMinScore", 90))),
   };
   await saveConfig(env, patch);
   return redirect("/admin?saved=1");
@@ -343,6 +396,23 @@ export async function renderEdit(env: Env, request: Request): Promise<Response> 
   const flash =
     url.searchParams.get("saved") === "1" ? `<div class="flash ok">已保存修改。</div>` : "";
   const slugEnc = encodeURIComponent(slug);
+
+  const rv = post.review;
+  let reviewBox = "";
+  if (rv) {
+    const sc = typeof rv.score === "number" ? `${rv.score} 分` : "";
+    const status = !rv.ok
+      ? `<span class="rv na">未审</span> 审稿未完成（出错/未运行）`
+      : rv.pass
+        ? `<span class="rv ok">${sc || "通过"}</span> 达标已发布`
+        : `<span class="rv no">${sc || "未过"}</span> 未达标`;
+    const probs = rv.problems?.length
+      ? `<ul>${rv.problems.map((p) => `<li>${esc(p)}</li>`).join("")}</ul>`
+      : "";
+    const sg = rv.suggestion ? `<div class="sg">建议：${esc(rv.suggestion)}</div>` : "";
+    const wc = rv.wordCount ? `<div class="sg">审稿员估计字数：${rv.wordCount}</div>` : "";
+    reviewBox = `<div class="review"><h3>审稿结论 ${status}</h3>${probs}${sg}${wc}</div>`;
+  }
   const body = `<div class="wrap">
   <div class="brand">${esc(env.SITE_TITLE || "智见")}<span class="tag">CONSOLE</span>
     <span style="flex:1"></span>
@@ -354,6 +424,7 @@ export async function renderEdit(env: Env, request: Request): Promise<Response> 
     <input type="hidden" name="slug" value="${esc(slug)}">
     <h2>编辑文章</h2>
     <p class="desc">slug: ${esc(slug)}</p>
+    ${reviewBox}
     ${textField("title", "标题", post.title)}
     ${textField("excerpt", "摘要", post.excerpt || "", "列表页与首页展示")}
     <label>正文 Markdown</label>
