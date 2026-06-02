@@ -121,6 +121,9 @@ export interface PostMeta {
   reviewPass?: boolean | null;
   /** Reviewer score (0-100) for list views. */
   reviewScore?: number;
+  /** Image version for cache-busting: bumped whenever images are (re)generated,
+   *  so updated pictures actually replace the year-long immutable-cached ones. */
+  imgVer?: number;
 }
 
 export interface Post extends PostMeta {

@@ -30,6 +30,22 @@ function stripReasoning(s: string): string {
   return out.trim();
 }
 
+// Coerce a field to text. CRITICAL: when a model outputs clean JSON, Workers AI
+// parses it and returns `response` (or `content`) as an OBJECT, not a string —
+// e.g. llama returns `{response:{score:88}}`. The reviewer/selector emit JSON,
+// so we must JSON.stringify objects here or those calls look empty.
+function asText(v: unknown): string {
+  if (typeof v === "string") return v;
+  if (v && typeof v === "object") {
+    try {
+      return JSON.stringify(v);
+    } catch {
+      return "";
+    }
+  }
+  return "";
+}
+
 // Handle both the OpenAI-style `{choices:[{message:{content}}]}` shape used by
 // newer models and the classic `{response}` shape. IMPORTANT: read only the
 // `content` field — reasoning models keep their thinking in a separate
@@ -40,11 +56,12 @@ function extractText(res: unknown): string {
     choices?: Array<{ message?: { content?: unknown }; text?: unknown }>;
   };
   const choice = r?.choices?.[0];
-  if (typeof choice?.message?.content === "string" && choice.message.content.trim()) {
-    return stripReasoning(choice.message.content);
-  }
-  if (typeof r?.response === "string" && r.response.trim()) return stripReasoning(r.response);
-  if (typeof choice?.text === "string") return stripReasoning(choice.text);
+  const content = asText(choice?.message?.content);
+  if (content.trim()) return stripReasoning(content);
+  const response = asText(r?.response);
+  if (response.trim()) return stripReasoning(response);
+  const text = asText(choice?.text);
+  if (text.trim()) return stripReasoning(text);
   return "";
 }
 
@@ -116,7 +133,28 @@ export async function runText(
   return extractText(res);
 }
 
-/** Generate a cover image and return raw bytes (jpeg). Always uses Workers AI. */
+// FLUX.2 [klein]/[dev] on Workers AI take multipart/form-data input (even for a
+// plain prompt) and have a FIXED 4-step process — the older `{prompt, steps}`
+// JSON shape used by flux-1-schnell does not apply.
+function isMultipartImageModel(model: string): boolean {
+  return /flux-2/i.test(model);
+}
+
+type ImageRunResult = { image?: string } | ArrayBuffer | Uint8Array | string;
+
+/** Decode whatever the image model returned (base64 string or raw bytes). */
+function decodeImage(res: ImageRunResult): Uint8Array {
+  if (res instanceof Uint8Array) return res;
+  if (res instanceof ArrayBuffer) return new Uint8Array(res);
+  const b64 = typeof res === "string" ? res : (res?.image ?? "");
+  if (!b64) throw new Error("image model returned no data");
+  const binary = atob(b64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return bytes;
+}
+
+/** Generate an image and return raw bytes. Always uses the Workers AI binding. */
 export async function generateImageBytes(
   env: Env,
   prompt: string,
@@ -124,22 +162,29 @@ export async function generateImageBytes(
 ): Promise<Uint8Array> {
   const width = parseInt(env.IMAGE_WIDTH || "1024", 10);
   const height = parseInt(env.IMAGE_HEIGHT || "576", 10);
+  const seed = Math.floor(Math.random() * 1_000_000);
   const ai = env.AI as unknown as {
-    run: (model: string, inputs: Record<string, unknown>) => Promise<{ image?: string }>;
+    run: (model: string, inputs: Record<string, unknown>) => Promise<ImageRunResult>;
   };
-  const res = await ai.run(model, {
-    prompt,
-    width,
-    height,
-    steps: 4,
-    seed: Math.floor(Math.random() * 1_000_000),
-  });
-  const b64 = res?.image ?? "";
-  if (!b64) throw new Error("image model returned no data");
-  const binary = atob(b64);
-  const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-  return bytes;
+
+  if (isMultipartImageModel(model)) {
+    // Build multipart body the way the runtime expects: a FormData serialized
+    // via Response so the boundary-bearing content-type header is generated.
+    // `steps` is fixed at 4 for the distilled klein models, so we omit it.
+    const form = new FormData();
+    form.append("prompt", prompt);
+    form.append("width", String(width));
+    form.append("height", String(height));
+    form.append("seed", String(seed));
+    const serialized = new Response(form);
+    const body = serialized.body;
+    const contentType = serialized.headers.get("content-type") ?? "multipart/form-data";
+    const res = await ai.run(model, { multipart: { body, contentType } });
+    return decodeImage(res);
+  }
+
+  const res = await ai.run(model, { prompt, width, height, steps: 4, seed });
+  return decodeImage(res);
 }
 
 /** Best-effort JSON extraction from a (possibly noisy) model response. */

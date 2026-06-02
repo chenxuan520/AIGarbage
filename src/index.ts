@@ -9,7 +9,7 @@ import {
   renderLogin,
 } from "./admin";
 import { isAuthed } from "./auth";
-import { runGeneration } from "./generate";
+import { regenerateImagesForPost, runGeneration } from "./generate";
 import { notifyLark } from "./notify";
 import { renderQr } from "./qr";
 import { fetchSourceContent } from "./sources";
@@ -106,6 +106,27 @@ export default {
         }
         await notifyLark(env, "测试通知", "这是一条测试告警，收到说明飞书 webhook 配置成功。");
         return Response.json({ ok: true, configured: true });
+      }
+
+      // Re-illustrate an existing post in place (key-guarded). Used to refresh
+      // older articles' images after the image-model/prompt upgrade.
+      if (path === "/admin/reimage") {
+        const keyOk = !!env.ADMIN_KEY && url.searchParams.get("key") === env.ADMIN_KEY;
+        if (!keyOk && !(await isAuthed(request, env))) {
+          return new Response("Forbidden", { status: 403 });
+        }
+        const slug = url.searchParams.get("slug") || "";
+        try {
+          const r = await regenerateImagesForPost(env, slug);
+          if (!r) return Response.json({ ok: false, error: "post not found", slug });
+          return Response.json({ ok: r.count > 0, slug, ...r });
+        } catch (e) {
+          const err = e as Error;
+          return Response.json(
+            { ok: false, slug, error: String(err?.message || err).slice(0, 600) },
+            { status: 500 },
+          );
+        }
       }
 
       if (path === "/admin/generate") {

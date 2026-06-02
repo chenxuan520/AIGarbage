@@ -34,9 +34,17 @@ SOURCES = "huxiu,zhihu,36kr,weibo,baidu,ithome,wallstreetcn"
 # more headroom: configure a custom model in /admin or upgrade to Workers Paid.
 AI_MODEL_SELECT = "@cf/meta/llama-3.3-70b-instruct-fp8-fast"
 AI_MODEL_WRITE = "@cf/meta/llama-3.3-70b-instruct-fp8-fast"
+# Reviewer: the old "empty review -> 未审" bug was NOT the model — Workers AI
+# returns clean JSON as a parsed object in `response`, which our extractor used
+# to drop (now fixed in ai.ts). llama returns a clean JSON verdict, fast & cheap.
+# (GLM works too via the regex-fallback parser, but is slower, pricier, and much
+# stricter; switch here + lower REVIEW_MIN_SCORE if you want a tougher critic.)
 AI_MODEL_REVIEW = "@cf/meta/llama-3.3-70b-instruct-fp8-fast"
-# Cover-image agent.
-AI_MODEL_IMAGE = "@cf/black-forest-labs/flux-1-schnell"
+# Cover-image agent. FLUX.2 [klein] 4B: distilled (fast/cheap, fixed 4 steps),
+# far better text handling + prompt adherence than flux-1-schnell, so images
+# stop covering everything in garbled fake signage. Bump to flux-2-klein-9b for
+# higher quality if the daily neuron budget allows.
+AI_MODEL_IMAGE = "@cf/black-forest-labs/flux-2-klein-4b"
 # Minimum Chinese characters. Kept moderate on purpose: the 3-part skeleton
 # (hook+background -> ~1500-char human story -> impact/closing) is usually
 # ~2.5k-4k already; a low floor avoids padding it with repetitive filler.

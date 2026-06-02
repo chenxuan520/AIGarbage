@@ -76,6 +76,7 @@ export async function savePost(
     source: post.source,
     reviewPass: post.reviewPass,
     reviewScore: post.reviewScore,
+    imgVer: post.imgVer ?? Date.now(),
   };
   index.unshift(meta);
   await env.BLOG_KV.put(INDEX_KEY, JSON.stringify(index.slice(0, INDEX_LIMIT)));
@@ -105,6 +106,48 @@ export async function updatePost(
     await env.BLOG_KV.put(INDEX_KEY, JSON.stringify(index));
   }
   return next;
+}
+
+/**
+ * Replace just the images of an existing post (cover = index 0, inline = 1..n)
+ * without touching its text, and sync hasCover/inlineImages in the post + index.
+ * Used to re-illustrate already-published articles after an image-model upgrade.
+ */
+export async function replaceImages(
+  env: Env,
+  slug: string,
+  images: Uint8Array[],
+): Promise<void> {
+  const post = await getPost(env, slug);
+  if (!post) return;
+
+  for (let i = 0; i < images.length; i++) {
+    const key = i === 0 ? `img:${slug}` : `img:${slug}:${i}`;
+    await env.BLOG_KV.put(key, images[i]);
+  }
+  // Clear any stale inline images beyond the new count (cover stays if we have one).
+  const oldInline = Math.max(post.inlineImages ?? 0, 8);
+  for (let i = Math.max(1, images.length); i <= oldInline; i++) {
+    await env.BLOG_KV.delete(`img:${slug}:${i}`);
+  }
+  if (images.length === 0) await env.BLOG_KV.delete(`img:${slug}`);
+
+  post.hasCover = images.length >= 1;
+  post.inlineImages = Math.max(0, images.length - 1);
+  post.imgVer = Date.now(); // bust the immutable image cache for the new pictures
+  await env.BLOG_KV.put(`post:${slug}`, JSON.stringify(post));
+
+  const index = await getIndex(env);
+  const i = index.findIndex((m) => m.slug === slug);
+  if (i >= 0) {
+    index[i] = {
+      ...index[i],
+      hasCover: post.hasCover,
+      inlineImages: post.inlineImages,
+      imgVer: post.imgVer,
+    };
+    await env.BLOG_KV.put(INDEX_KEY, JSON.stringify(index));
+  }
 }
 
 /** Record a draft that failed review (for the admin "未过审" log). */

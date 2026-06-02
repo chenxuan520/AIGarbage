@@ -12,7 +12,7 @@ import {
 } from "./prompts";
 import { notifyLark } from "./notify";
 import { fetchSourceContent, getSources } from "./sources";
-import { getIndex, logRejection, savePost, slugify } from "./store";
+import { getIndex, getPost, logRejection, replaceImages, savePost, slugify } from "./store";
 import type { Env, NewsItem, Post, PostSource, TopicSelection } from "./types";
 
 function countCjk(s: string): number {
@@ -145,13 +145,16 @@ async function collectCandidates(env: Env): Promise<NewsItem[]> {
   return items;
 }
 
-// Style suffix: clean, photojournalistic look. NOTE: we deliberately do NOT
-// say "no text" here — FLUX-schnell ignores negative phrasing and the tokens
-// "text/words/letters" actually make it scribble garbled glyphs. Text is
-// avoided instead by steering prompts away from text-bearing subjects.
+// Style suffix: clean, photojournalistic look. NOTE on two past defects:
+//  1) "text/words/letters" tokens make diffusion models scribble garbled glyphs,
+//     so text is avoided by steering prompts away from text-bearing SUBJECTS
+//     (handled in the prompt builder), not by negative phrasing here.
+//  2) "cinematic" / "35mm" / film cues made the model add black letterbox bars,
+//     so we ask for a full-frame photo filling the whole frame instead.
 const IMAGE_STYLE =
-  ", professional editorial news photography, photorealistic, candid real-world scene, " +
-  "cinematic natural lighting, shallow depth of field, clean minimal composition, high detail, 35mm";
+  ", professional editorial press photograph, photorealistic, true-to-life natural colors, " +
+  "soft natural daylight, sharp focus, clean uncluttered composition, " +
+  "full-frame photo filling the entire frame";
 
 function imageCount(cfg: GenConfig): number {
   return Math.min(Math.max(1, cfg.imageCount || 5), 6);
@@ -160,11 +163,14 @@ function imageCount(cfg: GenConfig): number {
 // Ensure we always have exactly `n` prompts, padding with generic exaggerated ones.
 function padPrompts(prompts: string[], n: number, title: string): string[] {
   const out = prompts.filter(Boolean).slice(0, n);
+  // Fallback only — keep these text-free and free of the (Chinese) headline so
+  // the image model never tries to render glyphs, and avoid "cinematic" (it adds
+  // letterbox bars).
   const generic = [
-    `a realistic candid documentary photograph evoking "${title}", real people and environment`,
-    `a cinematic editorial photo capturing the mood of "${title}"`,
-    `a photorealistic real-world scene related to "${title}"`,
-    `a professional photojournalistic shot illustrating "${title}"`,
+    "a candid documentary photograph of people reacting in a tense real-world moment, natural light",
+    "a photorealistic close-up of a worried person's face, soft daylight, clean background",
+    "a real-world environmental photograph of an empty workplace at dusk, no signage",
+    "a professional press photograph of hands holding a meaningful object, shallow background",
   ];
   let i = 0;
   while (out.length < n) out.push(generic[i++ % generic.length]);
@@ -310,30 +316,82 @@ interface Review {
 /** Review/harness agent: score the draft (0-100). Returns ok=false if the
  *  reviewer call/parse failed (e.g. quota error) so callers can tell "didn't
  *  run" apart from "scored low". */
+const clampScore = (n: number): number => Math.min(100, Math.max(0, Math.round(n)));
+
+/**
+ * Parse a reviewer reply into a verdict. Tries strict JSON first, then falls
+ * back to field-by-field regex — reasoning models (GLM) often emit *almost*
+ * valid JSON (e.g. closing the object early then appending "suggestion"
+ * outside), which JSON.parse rejects but the gate still needs a score from.
+ * Returns null only if no score can be found at all.
+ */
+export function parseReview(
+  text: string,
+  fallbackWordCount: number,
+): { score: number; problems: string[]; suggestion: string; wordCount: number } | null {
+  const p = parseJsonLoose<Record<string, unknown>>(text);
+  if (p && typeof p.score === "number" && Number.isFinite(p.score as number)) {
+    return {
+      score: clampScore(p.score as number),
+      problems: Array.isArray(p.problems) ? (p.problems as unknown[]).map(String) : [],
+      suggestion: p.suggestion ? String(p.suggestion) : "",
+      wordCount: typeof p.wordCount === "number" ? (p.wordCount as number) : fallbackWordCount,
+    };
+  }
+  const sm = text.match(/"?score"?\s*:\s*(\d{1,3})/i);
+  if (!sm) return null;
+  let problems: string[] = [];
+  const pm = text.match(/"?problems"?\s*:\s*(\[[\s\S]*?\])/i);
+  if (pm) {
+    try {
+      const arr = JSON.parse(pm[1]) as unknown;
+      if (Array.isArray(arr)) problems = arr.map(String);
+    } catch {
+      /* leave problems empty */
+    }
+  }
+  const gm = text.match(/"?suggestion"?\s*:\s*"([\s\S]*?)"/i);
+  const wm = text.match(/"?wordCount"?\s*:\s*(\d+)/i);
+  return {
+    score: clampScore(parseInt(sm[1], 10)),
+    problems,
+    suggestion: gm ? gm[1] : "",
+    wordCount: wm ? parseInt(wm[1], 10) : fallbackWordCount,
+  };
+}
+
 export async function reviewArticle(
   env: Env,
   markdown: string,
   cfg: GenConfig,
 ): Promise<Review> {
-  const text = await runText(
-    env,
-    cfg.modelReview,
-    buildReviewMessages(markdown, cfg.minChars),
-    600,
-    cfg,
-  );
-  const p = parseJsonLoose<Record<string, unknown>>(text);
-  // A real verdict has a numeric `score`. Anything else (empty/garbled/error
-  // JSON) means the review did not actually complete.
-  const ok = !!p && typeof p.score === "number" && Number.isFinite(p.score as number);
-  const score = ok ? Math.min(100, Math.max(0, Math.round(p!.score as number))) : 0;
-  return {
-    ok,
-    score,
-    problems: Array.isArray(p?.problems) ? (p?.problems as unknown[]).map(String) : [],
-    suggestion: p?.suggestion ? String(p.suggestion) : "",
-    wordCount: typeof p?.wordCount === "number" ? (p?.wordCount as number) : countCjk(markdown),
-  };
+  const fallbackWc = countCjk(markdown);
+  // Retry: a single transient Workers AI blip (4006/timeout) or an unparseable
+  // reply used to silently drop the verdict and publish the article as 未审.
+  // Try a few times — on BOTH a thrown error and a non-JSON reply — before
+  // giving up, so only a real, repeated failure ends up unreviewed.
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      // Budget must cover a reasoning model's hidden thinking PLUS the JSON it
+      // emits afterwards; 600 starved GLM (all tokens went to reasoning -> empty
+      // content). 2048 leaves ample room for the short verdict.
+      const text = await runText(
+        env,
+        cfg.modelReview,
+        buildReviewMessages(markdown, cfg.minChars),
+        2048,
+        cfg,
+      );
+      const r = parseReview(text, fallbackWc);
+      if (r) return { ok: true, ...r };
+      console.warn(
+        `review attempt ${attempt + 1}/3 unparseable: ${text.slice(0, 100).replace(/\s+/g, " ")}`,
+      );
+    } catch (e) {
+      console.error(`review attempt ${attempt + 1}/3 threw:`, e);
+    }
+  }
+  return { ok: false, score: 0, problems: [], suggestion: "", wordCount: fallbackWc };
 }
 
 async function reviseArticle(
@@ -426,13 +484,15 @@ async function deriveImagePrompts(
 ): Promise<string[]> {
   const want = imageCount(cfg);
   try {
-    // Use the (cheaper) write model — this is a short JSON task and we want to
-    // spare the neuron budget vs. the heavier select model.
+    // Use the SELECT model (llama by default), NOT the write model: the writer
+    // may be a reasoning model (GLM) whose hidden thinking starves a small token
+    // budget and returns empty JSON -> we'd silently fall back to generic
+    // prompts. A non-reasoning model returns the JSON reliably and cheaply.
     const text = await runText(
       env,
-      cfg.modelWrite,
+      cfg.modelSelect,
       buildImagePromptMessages(sel.chosenTitle, body, want),
-      700,
+      1200,
       cfg,
     );
     const parsed = parseJsonLoose<{ imagePrompts?: unknown }>(text);
@@ -447,6 +507,30 @@ async function deriveImagePrompts(
     console.error("derive image prompts failed; using selection prompts:", e);
   }
   return padPrompts(sel.imagePrompts ?? [], want, sel.chosenTitle);
+}
+
+/**
+ * Re-illustrate an EXISTING post in place: derive fresh prompts from its stored
+ * body and regenerate images with the current image model, overwriting the old
+ * ones. Leaves the article text untouched. Returns the prompts used + count.
+ */
+export async function regenerateImagesForPost(
+  env: Env,
+  slug: string,
+): Promise<{ count: number; prompts: string[] } | null> {
+  const post = await getPost(env, slug);
+  if (!post) return null;
+  const cfg = await getConfig(env);
+  const sel: TopicSelection = {
+    chosenTitle: post.title,
+    angle: "",
+    keyPoints: [],
+    imagePrompts: [],
+  };
+  const prompts = await deriveImagePrompts(env, sel, post.markdown, cfg);
+  const images = await generateImages(env, prompts, cfg.modelImage);
+  if (images.length) await replaceImages(env, slug, images);
+  return { count: images.length, prompts };
 }
 
 /** Agent 3: generate several exaggerated images; returns only successful ones. */

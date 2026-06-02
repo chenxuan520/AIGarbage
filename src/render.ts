@@ -4,7 +4,9 @@ import type { Env, Post, PostMeta } from "./types";
 
 marked.setOptions({ gfm: true, breaks: false });
 
-const PER_PAGE = 12;
+// Posts per page. Kept modest so the homepage stays tight and actually paginates
+// at the current article volume (首页 = 1 篇头条 + 6 卡片，满了翻页).
+const PER_PAGE = 7;
 
 // Neutral category label derived from the source outlet.
 const CATEGORY: Record<string, string> = {
@@ -121,16 +123,30 @@ function countChars(md: string): number {
   return m ? m.length : 0;
 }
 
-function inlineImgTag(slug: string, i: number): string {
-  return `<img src="/img/${encodeURIComponent(slug)}?i=${i}" alt="" loading="lazy">`;
+// Image cache-busting token. Images are served with a 1-year immutable cache,
+// so regenerated pictures (same /img/<slug> URL) would otherwise stay stale in
+// the browser forever. Appending ?v=<imgVer> changes the URL whenever images
+// are (re)generated; older posts (no imgVer) fall back to their publish time so
+// the URL still differs from the old no-version one and refreshes once.
+function imgVerStr(m: { imgVer?: number; date: string }): string {
+  const v = m.imgVer ?? Date.parse(m.date);
+  return String(Number.isFinite(v) && v > 0 ? v : 1);
 }
 
-function embedInlineImages(html: string, slug: string, count: number): string {
+function coverSrc(m: PostMeta): string {
+  return `/img/${encodeURIComponent(m.slug)}?v=${imgVerStr(m)}`;
+}
+
+function inlineImgTag(slug: string, i: number, ver: string): string {
+  return `<img src="/img/${encodeURIComponent(slug)}?i=${i}&v=${ver}" alt="" loading="lazy">`;
+}
+
+function embedInlineImages(html: string, slug: string, count: number, ver: string): string {
   if (count <= 0) return html;
   const parts = html.split("</p>");
   if (parts.length <= 2) {
     let tail = "";
-    for (let i = 1; i <= count; i++) tail += inlineImgTag(slug, i);
+    for (let i = 1; i <= count; i++) tail += inlineImgTag(slug, i, ver);
     return html + tail;
   }
   const breaks = parts.length - 1;
@@ -143,13 +159,13 @@ function embedInlineImages(html: string, slug: string, count: number): string {
       out += "</p>";
       if (placed < count && (i + 1) % step === 0) {
         placed += 1;
-        out += inlineImgTag(slug, placed);
+        out += inlineImgTag(slug, placed, ver);
       }
     }
   }
   while (placed < count) {
     placed += 1;
-    out += inlineImgTag(slug, placed);
+    out += inlineImgTag(slug, placed, ver);
   }
   return out;
 }
@@ -423,9 +439,7 @@ function statsRow(m: PostMeta): string {
 }
 
 function leadHtml(m: PostMeta): string {
-  const cover = m.hasCover
-    ? `<img src="/img/${encodeURIComponent(m.slug)}" alt="" loading="lazy">`
-    : "";
+  const cover = m.hasCover ? `<img src="${coverSrc(m)}" alt="" loading="lazy">` : "";
   const excerpt = m.excerpt ? `<p class="excerpt">${escHtml(m.excerpt)}…</p>` : "";
   const href = `/post/${encodeURIComponent(m.slug)}`;
   return `<section class="lead">
@@ -438,7 +452,7 @@ function leadHtml(m: PostMeta): string {
 
 function cardHtml(m: PostMeta, q = ""): string {
   const cover = m.hasCover
-    ? `<div class="cover"><img src="/img/${encodeURIComponent(m.slug)}" alt="" loading="lazy"></div>`
+    ? `<div class="cover"><img src="${coverSrc(m)}" alt="" loading="lazy"></div>`
     : `<div class="cover"></div>`;
   const href = `/post/${encodeURIComponent(m.slug)}`;
   const title = q ? highlight(m.title, q) : escHtml(m.title);
@@ -487,7 +501,7 @@ function overviewWidget(index: PostMeta[]): string {
 }
 
 // "实时热榜": top posts by heat, numbered, with a heat meter.
-function hotRankWidget(index: PostMeta[], excludeSlug?: string, n = 8): string {
+function hotRankWidget(index: PostMeta[], excludeSlug?: string, n = 5): string {
   const ranked = index
     .filter((m) => m.slug !== excludeSlug)
     .map((m) => ({ m, s: postStats(m) }))
@@ -513,7 +527,7 @@ function miniListWidget(title: string, items: PostMeta[]): string {
       const href = `/post/${encodeURIComponent(m.slug)}`;
       const s = postStats(m);
       const thumb = m.hasCover
-        ? `<span class="mt"><img src="/img/${encodeURIComponent(m.slug)}" alt="" loading="lazy"></span>`
+        ? `<span class="mt"><img src="${coverSrc(m)}" alt="" loading="lazy"></span>`
         : "";
       return `<a class="${m.hasCover ? "" : "notrim"}" href="${href}">${thumb}<span><span class="mx">${escHtml(
         m.title,
@@ -698,15 +712,16 @@ export async function renderPost(env: Env, slug: string): Promise<Response> {
     );
   }
 
-  const rendered = String(await marked.parse(stripLeadingH1(post.markdown)));
-  const content = embedInlineImages(rendered, slug, post.inlineImages ?? 0);
-  const cat = categoryOf(post);
   // Backfill char count for posts saved before the field existed.
   const chars = post.chars && post.chars > 0 ? post.chars : countChars(post.markdown);
   const fixed: Post = { ...post, chars };
+  const ver = imgVerStr(fixed);
+  const rendered = String(await marked.parse(stripLeadingH1(post.markdown)));
+  const content = embedInlineImages(rendered, slug, post.inlineImages ?? 0, ver);
+  const cat = categoryOf(post);
   const s = postStats(fixed);
   const cover = post.hasCover
-    ? `<figure class="cover-fig"><img src="/img/${encodeURIComponent(slug)}" alt=""></figure>`
+    ? `<figure class="cover-fig"><img src="/img/${encodeURIComponent(slug)}?v=${ver}" alt=""></figure>`
     : "";
 
   // Related: same category first, then fill with latest.
@@ -729,7 +744,7 @@ export async function renderPost(env: Env, slug: string): Promise<Response> {
   <a class="back" href="/">&larr; 返回首页</a>
 </main>`;
 
-  const railRight = `<aside class="rail rail-right">${hotRankWidget(index, slug, 8)}${miniListWidget(
+  const railRight = `<aside class="rail rail-right">${hotRankWidget(index, slug)}${miniListWidget(
     "相关阅读",
     related,
   )}</aside>`;
