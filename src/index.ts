@@ -18,6 +18,7 @@ import {
   renderHome,
   renderImage,
   renderPost,
+  renderRobots,
   renderRss,
   renderSearch,
   renderSitemap,
@@ -26,6 +27,29 @@ import type { Env } from "./types";
 
 function redirect(location: string): Response {
   return new Response(null, { status: 302, headers: { Location: location } });
+}
+
+/**
+ * Serve a GET response from the Cloudflare edge cache so repeat hits skip KV
+ * reads and re-rendering. The produced response carries its own Cache-Control
+ * (set at construction — adding it to a stream-bodied copy here would NOT reach
+ * the client); short TTLs keep new/edited posts fresh within a couple minutes.
+ * Only cacheable 200s are stored; non-GET and admin routes never reach here.
+ */
+async function serveCached(
+  request: Request,
+  ctx: ExecutionContext,
+  produce: () => Response | Promise<Response>,
+): Promise<Response> {
+  if (request.method !== "GET") return produce();
+  const cache = caches.default;
+  const hit = await cache.match(request);
+  if (hit) return hit;
+  const res = await produce();
+  if (res.status === 200 && res.headers.get("Cache-Control")) {
+    ctx.waitUntil(cache.put(request, res.clone()));
+  }
+  return res;
 }
 
 function errStr(e: unknown): string {
@@ -43,23 +67,30 @@ export default {
       if (path === "/") {
         const page = parseInt(url.searchParams.get("page") || "1", 10) || 1;
         const cat = url.searchParams.get("cat") || undefined;
-        return await renderHome(env, page, cat);
+        return serveCached(request, ctx, () => renderHome(env, origin, page, cat));
       }
       if (path === "/search") {
         const page = parseInt(url.searchParams.get("page") || "1", 10) || 1;
-        return await renderSearch(env, url.searchParams.get("q") || "", page);
+        const q = url.searchParams.get("q") || "";
+        return serveCached(request, ctx, () => renderSearch(env, origin, q, page));
       }
       if (path.startsWith("/post/")) {
-        return await renderPost(env, decodeURIComponent(path.slice(6)));
+        const slug = decodeURIComponent(path.slice(6));
+        return serveCached(request, ctx, () => renderPost(env, origin, slug));
       }
       if (path.startsWith("/img/")) {
         const idx = parseInt(url.searchParams.get("i") || "0", 10) || 0;
-        return await renderImage(env, decodeURIComponent(path.slice(5)), idx);
+        const slug = decodeURIComponent(path.slice(5));
+        // Keep renderImage's own 1-year immutable header; just add edge caching.
+        return serveCached(request, ctx, () => renderImage(env, slug, idx));
       }
       if (path === "/qr") return renderQr(url.searchParams.get("d") || "");
-      if (path === "/favicon.svg" || path === "/favicon.ico") return renderFavicon();
-      if (path === "/rss.xml") return await renderRss(env, origin);
-      if (path === "/sitemap.xml") return await renderSitemap(env, origin);
+      if (path === "/favicon.svg" || path === "/favicon.ico")
+        return serveCached(request, ctx, () => renderFavicon());
+      if (path === "/robots.txt") return renderRobots(origin);
+      if (path === "/rss.xml") return serveCached(request, ctx, () => renderRss(env, origin));
+      if (path === "/sitemap.xml")
+        return serveCached(request, ctx, () => renderSitemap(env, origin));
 
       // ---- admin console ----
       if (path === "/admin/login") {

@@ -26,6 +26,11 @@ export interface Env {
   SITE_TITLE: string;
   SITE_DESC: string;
 
+  // Cloudflare Web Analytics beacon token (public — it ships in the page). When
+  // set, the privacy-friendly, cookie-less beacon is injected on every page so
+  // you get REAL traffic numbers. Create a site under Web Analytics to get it.
+  CF_BEACON_TOKEN?: string;
+
   // Secret. Set via `wrangler secret put ADMIN_KEY`. Also used to sign sessions.
   ADMIN_KEY?: string;
 

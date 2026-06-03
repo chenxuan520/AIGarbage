@@ -94,7 +94,7 @@ in `src/sources/index.ts`.
 - `GET /` - paginated post list
 - `GET /post/<slug>` - a single article
 - `GET /img/<slug>` - the article cover image
-- `GET /rss.xml`, `GET /sitemap.xml`
+- `GET /rss.xml`, `GET /sitemap.xml`, `GET /robots.txt`
 - `GET /admin/generate?key=<ADMIN_KEY>` - manually trigger one generation
 
 ## Free-tier notes

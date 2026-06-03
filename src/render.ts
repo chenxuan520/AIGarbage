@@ -105,11 +105,16 @@ function highlight(text: string, q: string): string {
   return esc.replace(re, (m) => `<mark>${m}</mark>`);
 }
 
-function htmlResponse(body: string, status = 200): Response {
-  return new Response(body, {
-    status,
-    headers: { "content-type": "text/html; charset=utf-8" },
-  });
+function htmlResponse(body: string, status = 200, cacheControl?: string): Response {
+  const headers: Record<string, string> = {
+    "content-type": "text/html; charset=utf-8",
+    "x-content-type-options": "nosniff",
+    "referrer-policy": "strict-origin-when-cross-origin",
+  };
+  // Set caching at construction time: a Cache-Control added later via
+  // Headers.set() on a stream-bodied copy does NOT reach the client on Workers.
+  if (cacheControl) headers["cache-control"] = cacheControl;
+  return new Response(body, { status, headers });
 }
 
 function stripLeadingH1(md: string): string {
@@ -168,6 +173,35 @@ function embedInlineImages(html: string, slug: string, count: number, ver: strin
     out += inlineImgTag(slug, placed, ver);
   }
   return out;
+}
+
+// Plain-text snippet for the meta/OG description: drop markdown image/link
+// syntax and formatting marks, collapse whitespace, then trim to length.
+function plainExcerpt(md: string, n = 150): string {
+  const text = stripLeadingH1(md)
+    .replace(/!\[[^\]]*\]\([^)]*\)/g, "")
+    .replace(/\[([^\]]*)\]\([^)]*\)/g, "$1")
+    .replace(/[#>*`_~]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return text.slice(0, n);
+}
+
+// Sanitize the ONE place untrusted model output becomes live HTML: the rendered
+// article body (marked passes raw HTML through). Everything else on the page is
+// built from escHtml'd strings, so this closes the only realistic XSS vector.
+function sanitizeArticleHtml(html: string): string {
+  return (
+    html
+      // remove dangerous elements together with their contents
+      .replace(/<(script|style|iframe|object|embed|noscript)\b[\s\S]*?<\/\1\s*>/gi, "")
+      // remove any stray/standalone dangerous or document-level tags
+      .replace(/<\/?(script|style|iframe|object|embed|noscript|base|form|meta|link)\b[^>]*>/gi, "")
+      // strip inline event handlers (onclick=, onerror=, …)
+      .replace(/\son[a-z]+\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)/gi, "")
+      // neutralize javascript:/data: URLs in href/src
+      .replace(/\s(href|src)\s*=\s*("|')\s*(?:javascript|data):[^"']*\2/gi, " $1=$2#$2")
+  );
 }
 
 const CSS = `
@@ -392,15 +426,89 @@ function searchForm(q = ""): string {
   )}" autocomplete="off" aria-label="搜索报道"><button type="submit" aria-label="搜索">${ICON_SEARCH}</button></form>`;
 }
 
-function layout(env: Env, title: string, body: string, q = ""): string {
+// Per-page SEO/social metadata. Absent fields fall back to site-wide defaults.
+interface PageMeta {
+  description?: string;
+  /** Absolute canonical URL (also used for og:url). */
+  canonical?: string;
+  ogType?: "website" | "article";
+  /** Absolute image URL for the social card (cover image). */
+  ogImage?: string;
+  /** ISO publish time for article pages. */
+  publishedTime?: string;
+  /** Keep this page out of search indexes (search results, 404…). */
+  noindex?: boolean;
+  /** Schema.org JSON-LD object, embedded as-is. */
+  jsonLd?: Record<string, unknown>;
+}
+
+interface LayoutOpts {
+  q?: string;
+  meta?: PageMeta;
+}
+
+/** Absolute URL from an origin + root-relative path (`/img/x` → `https://…/img/x`). */
+function absUrl(origin: string, path: string): string {
+  return path.startsWith("http") ? path : `${origin}${path}`;
+}
+
+// Embed JSON-LD safely: the only way to break out of a <script> is a literal
+// "<", so escape every "<" to its unicode form.
+function jsonLdScript(data: Record<string, unknown>): string {
+  return `<script type="application/ld+json">${JSON.stringify(data).replace(
+    /</g,
+    "\\u003c",
+  )}</script>`;
+}
+
+// Cloudflare Web Analytics beacon (privacy-friendly, cookie-less, no write
+// cost). Injected only when a token is configured; the token is public anyway.
+function beaconScript(env: Env): string {
+  const token = (env.CF_BEACON_TOKEN || "").replace(/[^\w-]/g, "");
+  if (!token) return "";
+  return `<script defer src="https://static.cloudflareinsights.com/beacon.min.js" data-cf-beacon='{"token":"${token}"}'></script>`;
+}
+
+// Build the SEO/social <head> tags (description, Open Graph, Twitter, canonical,
+// JSON-LD). Everything is escaped for an HTML attribute context.
+function headMeta(env: Env, title: string, meta: PageMeta): string {
   const name = escHtml(env.SITE_TITLE || "智见");
+  const desc = escHtml((meta.description ?? env.SITE_DESC ?? "").replace(/\s+/g, " ").slice(0, 200));
+  const ogType = meta.ogType ?? "website";
+  const tags = [`<meta name="description" content="${desc}">`];
+  if (meta.noindex) tags.push(`<meta name="robots" content="noindex,follow">`);
+  if (meta.canonical) tags.push(`<link rel="canonical" href="${escHtml(meta.canonical)}">`);
+  tags.push(
+    `<meta property="og:site_name" content="${name}">`,
+    `<meta property="og:locale" content="zh_CN">`,
+    `<meta property="og:type" content="${ogType}">`,
+    `<meta property="og:title" content="${escHtml(title)}">`,
+    `<meta property="og:description" content="${desc}">`,
+  );
+  if (meta.canonical) tags.push(`<meta property="og:url" content="${escHtml(meta.canonical)}">`);
+  if (meta.ogImage) tags.push(`<meta property="og:image" content="${escHtml(meta.ogImage)}">`);
+  if (meta.publishedTime)
+    tags.push(`<meta property="article:published_time" content="${escHtml(meta.publishedTime)}">`);
+  tags.push(
+    `<meta name="twitter:card" content="${meta.ogImage ? "summary_large_image" : "summary"}">`,
+    `<meta name="twitter:title" content="${escHtml(title)}">`,
+    `<meta name="twitter:description" content="${desc}">`,
+  );
+  if (meta.ogImage) tags.push(`<meta name="twitter:image" content="${escHtml(meta.ogImage)}">`);
+  if (meta.jsonLd) tags.push(jsonLdScript(meta.jsonLd));
+  return tags.join("\n");
+}
+
+function layout(env: Env, title: string, body: string, opts: LayoutOpts = {}): string {
+  const name = escHtml(env.SITE_TITLE || "智见");
+  const q = opts.q ?? "";
   return `<!doctype html>
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<meta name="description" content="${escHtml(env.SITE_DESC || "")}">
 <title>${escHtml(title)}</title>
+${headMeta(env, title, opts.meta ?? {})}
 <link rel="alternate" type="application/rss+xml" href="/rss.xml" title="${name}">
 <link rel="icon" type="image/svg+xml" href="/favicon.svg">
 <link rel="apple-touch-icon" href="/favicon.svg">
@@ -426,6 +534,7 @@ ${body}
   </div>
 </footer>
 ${THEME_TOGGLE}
+${beaconScript(env)}
 </body>
 </html>`;
 }
@@ -550,7 +659,12 @@ function pagerHtml(page: number, total: number, href: (p: number) => string): st
   return `<nav class="pager">${prev}<span>${page} / ${total}</span>${next}</nav>`;
 }
 
-export async function renderHome(env: Env, page = 1, cat?: string): Promise<Response> {
+export async function renderHome(
+  env: Env,
+  origin: string,
+  page = 1,
+  cat?: string,
+): Promise<Response> {
   const index = await getIndex(env);
   const filtered = cat ? index.filter((m) => categoryOf(m) === cat) : index;
   const totalPages = Math.max(1, Math.ceil(filtered.length / PER_PAGE));
@@ -595,10 +709,31 @@ export async function renderHome(env: Env, page = 1, cat?: string): Promise<Resp
 
   const body = `${masthead}<div class="layout">${railLeft}<main class="main-col">${center}</main>${railRight}</div>`;
   const title = cat ? `${cat} · ${env.SITE_TITLE || "智见"}` : env.SITE_TITLE || "智见";
-  return htmlResponse(layout(env, title, body));
+
+  const catQ = cat ? `?cat=${encodeURIComponent(cat)}` : "";
+  const pageQ = current > 1 ? `${catQ ? "&" : "?"}page=${current}` : "";
+  const canonical = `${origin}/${catQ}${pageQ}`;
+  const ogPost = slice.find((m) => m.hasCover) ?? index.find((m) => m.hasCover);
+  return htmlResponse(
+    layout(env, title, body, {
+      meta: {
+        description: env.SITE_DESC,
+        canonical,
+        ogType: "website",
+        ogImage: ogPost ? absUrl(origin, coverSrc(ogPost)) : undefined,
+      },
+    }),
+    200,
+    "public, max-age=60, s-maxage=120",
+  );
 }
 
-export async function renderSearch(env: Env, query: string, page = 1): Promise<Response> {
+export async function renderSearch(
+  env: Env,
+  origin: string,
+  query: string,
+  page = 1,
+): Promise<Response> {
   const index = await getIndex(env);
   const q = (query || "").trim().slice(0, 60);
   const ql = q.toLowerCase();
@@ -646,7 +781,13 @@ export async function renderSearch(env: Env, query: string, page = 1): Promise<R
   const title = q
     ? `搜索“${q}” · ${env.SITE_TITLE || "智见"}`
     : `站内搜索 · ${env.SITE_TITLE || "智见"}`;
-  return htmlResponse(layout(env, title, body, q));
+  const canonical = q ? `${origin}/search?q=${encodeURIComponent(q)}` : `${origin}/search`;
+  // Search result pages are thin/duplicate — keep them out of the index.
+  return htmlResponse(
+    layout(env, title, body, { q, meta: { canonical, noindex: true } }),
+    200,
+    "public, max-age=60, s-maxage=120",
+  );
 }
 
 // Left rail on the article: per-article data card + share buttons.
@@ -699,7 +840,7 @@ const ARTICLE_SCRIPT = `<script>(function(){
 
 const SHARE_MODAL = `<div id="wxModal" class="modal" hidden><div class="modal-bg"></div><div class="modal-card"><button class="modal-x" id="wxClose" type="button" aria-label="关闭">&times;</button><h4>微信扫一扫，分享给好友</h4><img id="wxQr" class="wxqr" alt="二维码" width="200" height="200"><p class="note" style="margin:12px 0 0;color:var(--muted);font-size:12.5px">打开微信「扫一扫」即可分享本文</p></div></div><div id="toast" class="toast" role="status" aria-live="polite"></div>`;
 
-export async function renderPost(env: Env, slug: string): Promise<Response> {
+export async function renderPost(env: Env, origin: string, slug: string): Promise<Response> {
   const [post, index] = await Promise.all([getPost(env, slug), getIndex(env)]);
   if (!post) {
     return htmlResponse(
@@ -707,6 +848,7 @@ export async function renderPost(env: Env, slug: string): Promise<Response> {
         env,
         "404",
         `<div class="layout"><main class="main-col"><p class="empty">未找到该文章。</p></main></div>`,
+        { meta: { noindex: true } },
       ),
       404,
     );
@@ -716,7 +858,7 @@ export async function renderPost(env: Env, slug: string): Promise<Response> {
   const chars = post.chars && post.chars > 0 ? post.chars : countChars(post.markdown);
   const fixed: Post = { ...post, chars };
   const ver = imgVerStr(fixed);
-  const rendered = String(await marked.parse(stripLeadingH1(post.markdown)));
+  const rendered = sanitizeArticleHtml(String(await marked.parse(stripLeadingH1(post.markdown))));
   const content = embedInlineImages(rendered, slug, post.inlineImages ?? 0, ver);
   const cat = categoryOf(post);
   const s = postStats(fixed);
@@ -753,7 +895,39 @@ export async function renderPost(env: Env, slug: string): Promise<Response> {
     fixed,
   )}${main}${railRight}</div>${SHARE_MODAL}${ARTICLE_SCRIPT}`;
 
-  return htmlResponse(layout(env, post.title, body));
+  const canonical = `${origin}/post/${encodeURIComponent(slug)}`;
+  const description = post.excerpt?.trim() || plainExcerpt(post.markdown);
+  const ogImage = post.hasCover
+    ? `${origin}/img/${encodeURIComponent(slug)}?v=${ver}`
+    : undefined;
+  // Schema.org NewsArticle so Google can show rich/article results.
+  const jsonLd: Record<string, unknown> = {
+    "@context": "https://schema.org",
+    "@type": "NewsArticle",
+    headline: post.title,
+    datePublished: post.date,
+    dateModified: post.date,
+    description,
+    mainEntityOfPage: canonical,
+    author: { "@type": "Organization", name: `${env.SITE_TITLE || "智见"}编辑部` },
+    publisher: { "@type": "Organization", name: env.SITE_TITLE || "智见" },
+  };
+  if (ogImage) jsonLd.image = [ogImage];
+
+  return htmlResponse(
+    layout(env, post.title, body, {
+      meta: {
+        description,
+        canonical,
+        ogType: "article",
+        ogImage,
+        publishedTime: post.date,
+        jsonLd,
+      },
+    }),
+    200,
+    "public, max-age=120, s-maxage=300",
+  );
 }
 
 export async function renderImage(env: Env, slug: string, idx = 0): Promise<Response> {
@@ -785,7 +959,10 @@ export async function renderRss(env: Env, origin: string): Promise<Response> {
     env.SITE_DESC || "",
   )}</description>${items}</channel></rss>`;
   return new Response(xml, {
-    headers: { "content-type": "application/rss+xml; charset=utf-8" },
+    headers: {
+      "content-type": "application/rss+xml; charset=utf-8",
+      "cache-control": "public, max-age=900",
+    },
   });
 }
 
@@ -796,5 +973,27 @@ export async function renderSitemap(env: Env, origin: string): Promise<Response>
     .join("");
   const xml = `<?xml version="1.0" encoding="UTF-8"?>
 <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">${urls}</urlset>`;
-  return new Response(xml, { headers: { "content-type": "application/xml; charset=utf-8" } });
+  return new Response(xml, {
+    headers: {
+      "content-type": "application/xml; charset=utf-8",
+      "cache-control": "public, max-age=3600",
+    },
+  });
+}
+
+export function renderRobots(origin: string): Response {
+  // Allow crawling of public content; keep admin and thin search pages out.
+  const body = `User-agent: *
+Allow: /
+Disallow: /admin
+Disallow: /search
+
+Sitemap: ${origin}/sitemap.xml
+`;
+  return new Response(body, {
+    headers: {
+      "content-type": "text/plain; charset=utf-8",
+      "cache-control": "public, max-age=86400",
+    },
+  });
 }

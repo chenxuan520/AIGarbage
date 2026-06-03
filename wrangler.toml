@@ -61,6 +61,10 @@ IMAGE_COUNT = "5"
 WRITE_MAX_TOKENS = "4096"
 SITE_TITLE = "智见"
 SITE_DESC = "洞察前沿热点，解读时代趋势"
+# Real traffic analytics (free, cookie-less). Create a site under Cloudflare
+# dashboard → Analytics & Logs → Web Analytics, copy its beacon token here, and
+# every page will report real pageviews. Left blank = beacon not injected.
+# CF_BEACON_TOKEN = "your-web-analytics-token"
 
 # Admin console login. Demo: user "admin" / pass "admin888".
 # Override the password in production with: wrangler secret put ADMIN_PASS
