@@ -59,6 +59,10 @@ IMAGE_HEIGHT = "576"
 # Images per article (1 cover + the rest inline). Capped at 6.
 IMAGE_COUNT = "5"
 WRITE_MAX_TOKENS = "4096"
+# Rolling retention. Each post is ~2 MB (5 JPEGs), so the 1 GB KV free tier
+# holds ~500. Keeping the newest 100 (~200 MB) leaves plenty of headroom; when
+# a new article pushes past this, the oldest is auto-deleted (text + images).
+MAX_POSTS = "100"
 SITE_TITLE = "智见"
 SITE_DESC = "洞察前沿热点，解读时代趋势"
 # Real traffic analytics (free, cookie-less). Create a site under Cloudflare

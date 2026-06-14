@@ -81,6 +81,9 @@ npx wrangler dev
 - `AI_MODEL_SELECT` / `AI_MODEL_WRITE` / `AI_MODEL_IMAGE` - model per agent.
 - `IMAGE_WIDTH` / `IMAGE_HEIGHT` - cover size (default 1024x576, 16:9).
 - `WRITE_MAX_TOKENS` - article length budget.
+- `MAX_POSTS` - rolling retention; keep only the newest N posts (default 100).
+  When a new article exceeds it, the oldest (text + images) is deleted so KV
+  storage stays bounded on the 1 GB free tier (~2 MB/post).
 - `crons` under `[triggers]` - generation schedule (default every 6 hours).
 
 ### Adding a data source

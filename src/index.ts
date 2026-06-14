@@ -13,6 +13,7 @@ import { regenerateImagesForPost, runGeneration } from "./generate";
 import { notifyLark } from "./notify";
 import { renderQr } from "./qr";
 import { fetchSourceContent } from "./sources";
+import { getCacheVersion } from "./store";
 import {
   renderFavicon,
   renderHome,
@@ -35,19 +36,29 @@ function redirect(location: string): Response {
  * (set at construction — adding it to a stream-bodied copy here would NOT reach
  * the client); short TTLs keep new/edited posts fresh within a couple minutes.
  * Only cacheable 200s are stored; non-GET and admin routes never reach here.
+ *
+ * The content version is folded into the cache KEY (not the user-facing URL), so
+ * any add/edit/delete (which bumps the version) abandons every old cached entry
+ * within ~60s globally — deleted posts vanish from lists/热榜/搜索 and their
+ * article+image pages 404, instead of lingering until each route's TTL.
  */
 async function serveCached(
   request: Request,
+  env: Env,
   ctx: ExecutionContext,
   produce: () => Response | Promise<Response>,
 ): Promise<Response> {
   if (request.method !== "GET") return produce();
   const cache = caches.default;
-  const hit = await cache.match(request);
+  const ver = await getCacheVersion(env);
+  const keyUrl = new URL(request.url);
+  keyUrl.searchParams.set("__v", ver);
+  const cacheKey = new Request(keyUrl.toString(), request);
+  const hit = await cache.match(cacheKey);
   if (hit) return hit;
   const res = await produce();
   if (res.status === 200 && res.headers.get("Cache-Control")) {
-    ctx.waitUntil(cache.put(request, res.clone()));
+    ctx.waitUntil(cache.put(cacheKey, res.clone()));
   }
   return res;
 }
@@ -67,30 +78,30 @@ export default {
       if (path === "/") {
         const page = parseInt(url.searchParams.get("page") || "1", 10) || 1;
         const cat = url.searchParams.get("cat") || undefined;
-        return serveCached(request, ctx, () => renderHome(env, origin, page, cat));
+        return serveCached(request, env, ctx, () => renderHome(env, origin, page, cat));
       }
       if (path === "/search") {
         const page = parseInt(url.searchParams.get("page") || "1", 10) || 1;
         const q = url.searchParams.get("q") || "";
-        return serveCached(request, ctx, () => renderSearch(env, origin, q, page));
+        return serveCached(request, env, ctx, () => renderSearch(env, origin, q, page));
       }
       if (path.startsWith("/post/")) {
         const slug = decodeURIComponent(path.slice(6));
-        return serveCached(request, ctx, () => renderPost(env, origin, slug));
+        return serveCached(request, env, ctx, () => renderPost(env, origin, slug));
       }
       if (path.startsWith("/img/")) {
         const idx = parseInt(url.searchParams.get("i") || "0", 10) || 0;
         const slug = decodeURIComponent(path.slice(5));
         // Keep renderImage's own 1-year immutable header; just add edge caching.
-        return serveCached(request, ctx, () => renderImage(env, slug, idx));
+        return serveCached(request, env, ctx, () => renderImage(env, slug, idx));
       }
       if (path === "/qr") return renderQr(url.searchParams.get("d") || "");
       if (path === "/favicon.svg" || path === "/favicon.ico")
-        return serveCached(request, ctx, () => renderFavicon());
+        return serveCached(request, env, ctx, () => renderFavicon());
       if (path === "/robots.txt") return renderRobots(origin);
-      if (path === "/rss.xml") return serveCached(request, ctx, () => renderRss(env, origin));
+      if (path === "/rss.xml") return serveCached(request, env, ctx, () => renderRss(env, origin));
       if (path === "/sitemap.xml")
-        return serveCached(request, ctx, () => renderSitemap(env, origin));
+        return serveCached(request, env, ctx, () => renderSitemap(env, origin));
 
       // ---- admin console ----
       if (path === "/admin/login") {

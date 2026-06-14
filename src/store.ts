@@ -1,9 +1,50 @@
 import type { Env, Post, PostMeta, Rejection } from "./types";
 
 const INDEX_KEY = "index";
-const INDEX_LIMIT = 1000;
 const REJECT_KEY = "rejections";
 const REJECT_LIMIT = 30;
+const CACHE_VER_KEY = "cacheVer";
+// Fallback when MAX_POSTS is unset/invalid. ~2 MB/post (5 JPEGs) => ~100 posts
+// is ~200 MB, comfortably inside the 1 GB KV free tier.
+const MAX_POSTS_DEFAULT = 100;
+
+/** Rolling-retention size: how many newest posts to keep (rest are pruned). */
+function maxPosts(env: Env): number {
+  const n = parseInt(env.MAX_POSTS || "", 10);
+  return Number.isFinite(n) && n > 0 ? n : MAX_POSTS_DEFAULT;
+}
+
+/**
+ * Monotonic content version, folded into edge-cache keys. Any add/edit/delete
+ * bumps it so every previously-cached list/article/feed/image entry is abandoned
+ * within ~cacheTtl seconds GLOBALLY — deleted posts stop showing up in 热榜/排行/
+ * 搜索/相关阅读 and their article+image pages 404, without per-URL purging
+ * (Workers' `caches.default.delete()` only clears the one colo it runs in).
+ */
+export async function getCacheVersion(env: Env): Promise<string> {
+  // cacheTtl keeps this from being a real KV read on every request: it's served
+  // from the per-colo edge cache, refreshing (and so picking up a bump) ≤60s.
+  return (await env.BLOG_KV.get(CACHE_VER_KEY, { cacheTtl: 60 })) || "0";
+}
+
+async function bumpCacheVersion(env: Env): Promise<void> {
+  await env.BLOG_KV.put(CACHE_VER_KEY, String(Date.now()));
+}
+
+/**
+ * Delete a post's body + all its image keys. `inlineImages` is the known inline
+ * count; we still clear a safe range (>=8) in case the count is missing/stale.
+ */
+async function purgePostKeys(
+  env: Env,
+  slug: string,
+  inlineImages?: number,
+): Promise<void> {
+  await env.BLOG_KV.delete(`post:${slug}`);
+  await env.BLOG_KV.delete(`img:${slug}`);
+  const inline = Math.max(inlineImages ?? 0, 8);
+  for (let i = 1; i <= inline; i++) await env.BLOG_KV.delete(`img:${slug}:${i}`);
+}
 
 /** Build a URL-safe, collision-resistant slug (date + title + random). */
 export function slugify(title: string): string {
@@ -79,7 +120,16 @@ export async function savePost(
     imgVer: post.imgVer ?? Date.now(),
   };
   index.unshift(meta);
-  await env.BLOG_KV.put(INDEX_KEY, JSON.stringify(index.slice(0, INDEX_LIMIT)));
+
+  // Rolling retention: keep the newest N, prune the overflow. Write the trimmed
+  // index FIRST so the site never links to a half-deleted post; if a later
+  // delete fails it just leaves a tiny orphan image, never a dead link.
+  const max = maxPosts(env);
+  const kept = index.slice(0, max);
+  const pruned = index.slice(max); // oldest beyond the cap
+  await env.BLOG_KV.put(INDEX_KEY, JSON.stringify(kept));
+  for (const m of pruned) await purgePostKeys(env, m.slug, m.inlineImages);
+  await bumpCacheVersion(env);
 }
 
 /** Update an existing post's editable fields and sync the index entry. */
@@ -105,6 +155,7 @@ export async function updatePost(
     };
     await env.BLOG_KV.put(INDEX_KEY, JSON.stringify(index));
   }
+  await bumpCacheVersion(env);
   return next;
 }
 
@@ -148,6 +199,7 @@ export async function replaceImages(
     };
     await env.BLOG_KV.put(INDEX_KEY, JSON.stringify(index));
   }
+  await bumpCacheVersion(env);
 }
 
 /** Record a draft that failed review (for the admin "未过审" log). */
@@ -170,12 +222,9 @@ export async function getRejections(env: Env): Promise<Rejection[]> {
 /** Delete a post, its images, and remove it from the index. */
 export async function deletePost(env: Env, slug: string): Promise<void> {
   const post = await getPost(env, slug);
-  await env.BLOG_KV.delete(`post:${slug}`);
-  await env.BLOG_KV.delete(`img:${slug}`);
-  // Inline images are capped low; clear a safe range even if the count is lost.
-  const inline = Math.max(post?.inlineImages ?? 0, 8);
-  for (let i = 1; i <= inline; i++) await env.BLOG_KV.delete(`img:${slug}:${i}`);
+  await purgePostKeys(env, slug, post?.inlineImages);
 
   const index = await getIndex(env);
   await env.BLOG_KV.put(INDEX_KEY, JSON.stringify(index.filter((m) => m.slug !== slug)));
+  await bumpCacheVersion(env);
 }

@@ -23,6 +23,11 @@ export interface Env {
   IMAGE_COUNT: string;
   WRITE_MAX_TOKENS: string;
 
+  // Rolling retention: keep only the newest N posts. When a new article pushes
+  // the count past this, the oldest are deleted (text + images) so KV storage
+  // stays bounded on the 1 GB free tier. Unset/invalid falls back to a default.
+  MAX_POSTS?: string;
+
   SITE_TITLE: string;
   SITE_DESC: string;
 
