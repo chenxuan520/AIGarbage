@@ -123,6 +123,52 @@ function dedupeParagraphs(md: string): string {
   return out.join("\n\n");
 }
 
+function shortError(e: unknown): string {
+  const err = e as Error;
+  return String(err?.message || err).slice(0, 500);
+}
+
+function wait(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function runTextForStage(
+  env: Env,
+  stage: string,
+  model: string,
+  messages: ReturnType<typeof buildWriteMessages>,
+  maxTokens: number,
+  cfg: GenConfig,
+  attempts = 2,
+): Promise<string> {
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    try {
+      return await runText(env, model, messages, maxTokens, cfg);
+    } catch (e) {
+      const label = `${stage} attempt ${attempt + 1}/${attempts}`;
+      if (attempt === attempts - 1) {
+        console.error(`${label} failed permanently:`, e);
+        throw new Error(`${stage} failed after ${attempts} attempts: ${shortError(e)}`);
+      }
+      console.warn(`${label} failed; retrying:`, e);
+      await wait(1000 * (attempt + 1));
+    }
+  }
+  throw new Error(`${stage} failed without an error`);
+}
+
+async function settleDraftParts(
+  parts: Array<Promise<string>>,
+  labels: string[],
+): Promise<string[]> {
+  const settled = await Promise.allSettled(parts);
+  const failures = settled
+    .map((r, i) => (r.status === "rejected" ? `${labels[i]}: ${shortError(r.reason)}` : ""))
+    .filter(Boolean);
+  if (failures.length) throw new Error(`正文生成失败: ${failures.join(" | ")}`);
+  return settled.map((r) => (r as PromiseFulfilledResult<string>).value);
+}
+
 /** Fetch every enabled source in parallel and dedupe by title. */
 async function collectCandidates(env: Env): Promise<NewsItem[]> {
   const sources = getSources(env);
@@ -245,8 +291,9 @@ export async function writeArticle(
   cfg: GenConfig,
   reference = "",
 ): Promise<string> {
-  const md = await runText(
+  const md = await runTextForStage(
     env,
+    "write:intro",
     cfg.modelWrite,
     buildWriteMessages(sel, reference),
     cfg.writeMaxTokens,
@@ -264,8 +311,9 @@ async function writeMore(
   reference = "",
 ): Promise<string> {
   const tail = soFar.slice(-800);
-  const md = await runText(
+  const md = await runTextForStage(
     env,
+    "write:extension",
     cfg.modelWrite,
     buildContinuationMessages(sel, tail, reference),
     cfg.writeMaxTokens,
@@ -288,7 +336,14 @@ async function writeStory(
   reference = "",
 ): Promise<string> {
   const tokens = Math.max(cfg.writeMaxTokens, 5000);
-  const md = await runText(env, cfg.modelWrite, buildStoryMessages(sel, reference), tokens, cfg);
+  const md = await runTextForStage(
+    env,
+    "write:story",
+    cfg.modelWrite,
+    buildStoryMessages(sel, reference),
+    tokens,
+    cfg,
+  );
   return cleanFragment(md);
 }
 
@@ -301,7 +356,14 @@ async function writeClosing(
   reference = "",
 ): Promise<string> {
   const tokens = Math.max(cfg.writeMaxTokens, 6000);
-  const md = await runText(env, cfg.modelWrite, buildClosingMessages(sel, reference), tokens, cfg);
+  const md = await runTextForStage(
+    env,
+    "write:closing",
+    cfg.modelWrite,
+    buildClosingMessages(sel, reference),
+    tokens,
+    cfg,
+  );
   return cleanFragment(md);
 }
 
@@ -427,11 +489,14 @@ async function writeWithHarness(
   // middle: 开头(钩子+背景+矛盾) -> 人物故事(~1500字) -> 结尾(影响+分析). This
   // fixed skeleton is what makes articles engaging AND kills the old
   // continuation-loop repetition (same sections written over and over).
-  const [intro, story, closing] = await Promise.all([
-    writeArticle(env, sel, cfg, reference),
-    writeStory(env, sel, cfg, reference),
-    writeClosing(env, sel, cfg, reference),
-  ]);
+  const [intro, story, closing] = await settleDraftParts(
+    [
+      writeArticle(env, sel, cfg, reference),
+      writeStory(env, sel, cfg, reference),
+      writeClosing(env, sel, cfg, reference),
+    ],
+    ["write:intro", "write:story", "write:closing"],
+  );
   let md = dedupeParagraphs([intro, story, closing].filter(Boolean).join("\n\n"));
   console.log(
     `draft: intro=${countCjk(intro)} story=${countCjk(story)} closing=${countCjk(closing)} total=${countCjk(md)}`,
