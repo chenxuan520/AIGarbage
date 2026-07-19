@@ -139,7 +139,7 @@ async function runTextForStage(
   messages: ReturnType<typeof buildWriteMessages>,
   maxTokens: number,
   cfg: GenConfig,
-  attempts = 2,
+  attempts = 4,
 ): Promise<string> {
   for (let attempt = 0; attempt < attempts; attempt++) {
     try {
